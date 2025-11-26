@@ -1,12 +1,10 @@
 #include "AsyncRedisSession.h"
 #include "base/RedisLog.h"
-#include <galay/kernel/coroutine/AsyncWaiter.hpp>
 #include <galay/kernel/async/AsyncFactory.h>
 #include <galay/common/Error.h>
 
 namespace galay::redis
 {
-    using galay::AsyncWaiter;
 
     // ======================== 构造函数 ========================
 
@@ -182,8 +180,8 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::execute(const std::string& cmd)
     {
-        std::vector<std::string> parts = {cmd};
-        return execute(parts);
+        std::vector<std::string> cmd_parts = {cmd};
+        return execute(cmd_parts);
     }
 
     /**
@@ -195,11 +193,22 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::execute(const std::string& cmd, const std::vector<std::string>& args)
     {
-        std::vector<std::string> parts;
-        parts.reserve(1 + args.size());
-        parts.push_back(cmd);
-        parts.insert(parts.end(), args.begin(), args.end());
-        return execute(parts);
+        // 检查会话是否已关闭
+        if (m_is_closed) {
+            auto waiter = std::make_shared<AsyncWaiter<RedisValue, RedisError>>();
+            waiter->notify(std::unexpected(RedisError(ConnectionClosed, "Session is closed")));
+            return waiter->wait();
+        }
+
+        // 构建命令参数列表
+        std::vector<std::string> cmd_parts;
+        cmd_parts.reserve(1 + args.size());
+        cmd_parts.push_back(cmd);
+        cmd_parts.insert(cmd_parts.end(), args.begin(), args.end());
+
+        // 编码并执行命令
+        auto encoded = m_encoder.encodeCommand(cmd_parts);
+        return executeCommand(std::move(encoded));
     }
 
     /**
@@ -217,7 +226,7 @@ namespace galay::redis
             return waiter->wait();
         }
 
-        // 使用RESP协议编码器编码命令
+        // 编码并执行命令
         auto encoded = m_encoder.encodeCommand(cmd_parts);
         return executeCommand(std::move(encoded));
     }
@@ -235,7 +244,7 @@ namespace galay::redis
         auto waiter = std::make_shared<AsyncWaiter<void, RedisError>>();
 
         waiter->appendTask([this](auto waiter, auto* self, std::string pwd) -> Coroutine<nil> {
-            auto result = co_await self->execute("AUTH", {pwd});
+            auto result = co_await self->execute("AUTH", pwd);  // 使用模板版本，避免创建 vector
             if (!result) {
                 waiter->notify(std::unexpected(result.error()));
             } else {

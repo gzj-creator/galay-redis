@@ -495,7 +495,20 @@ namespace galay::redis::protocol
         return result;
     }
 
-    std::string RespEncoder::encodeCommand(const std::string& cmd, const std::vector<std::string>& args)
+    std::string RespEncoder::encodeCommand(std::initializer_list<std::string> cmd_parts)
+    {
+        if (cmd_parts.size() == 0) {
+            return "*0\r\n";
+        }
+
+        std::string result = "*" + std::to_string(cmd_parts.size()) + "\r\n";
+        for (const auto& part : cmd_parts) {
+            result += encodeBulkString(part);
+        }
+        return result;
+    }
+
+    std::string RespEncoder::encodeCommand(const std::string& cmd, std::initializer_list<std::string> args)
     {
         std::string result = "*" + std::to_string(1 + args.size()) + "\r\n";
         result += encodeBulkString(cmd);
@@ -503,14 +516,6 @@ namespace galay::redis::protocol
             result += encodeBulkString(arg);
         }
         return result;
-    }
-
-    std::string RespEncoder::encodeCommand(const std::vector<std::string>& cmd_parts)
-    {
-        if (cmd_parts.empty()) {
-            return "*0\r\n";
-        }
-        return encodeArray(cmd_parts);
     }
 
     std::string RespEncoder::encodeDouble(double value)

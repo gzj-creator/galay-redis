@@ -4,6 +4,7 @@
 #include <galay/kernel/async/Socket.h>
 #include <galay/kernel/coroutine/CoSchedulerHandle.hpp>
 #include <galay/kernel/coroutine/Result.hpp>
+#include <galay/kernel/coroutine/AsyncWaiter.hpp>
 #include <galay/common/Base.h>
 #include <string>
 #include <expected>
@@ -25,6 +26,9 @@ namespace galay::redis
     using galay::Bytes;
     using galay::error::CommonError;
 
+    template<typename T, typename E>
+    using AsyncWaiter = galay::AsyncWaiter<T, E>;
+
     // 异步Redis会话类 - 类似 HttpConnection 的设计模式
     class AsyncRedisSession
     {
@@ -40,6 +44,28 @@ namespace galay::redis
         AsyncResult<std::expected<RedisValue, RedisError>> execute(const std::string& cmd,
                                                                 const std::vector<std::string>& args);
         AsyncResult<std::expected<RedisValue, RedisError>> execute(const std::vector<std::string>& cmd_parts);
+
+        // 可变参数模板版本 - 避免创建临时 vector（高性能版本）
+        template<typename... Args>
+        AsyncResult<std::expected<RedisValue, RedisError>> execute(const std::string& cmd, Args&&... args)
+        {
+            // 检查会话是否已关闭
+            if (m_is_closed) {
+                auto waiter = std::make_shared<AsyncWaiter<RedisValue, RedisError>>();
+                waiter->notify(std::unexpected(RedisError(ConnectionClosed, "Session is closed")));
+                return waiter->wait();
+            }
+
+            // 构建命令参数列表
+            std::vector<std::string> cmd_parts;
+            cmd_parts.reserve(1 + sizeof...(args));
+            cmd_parts.push_back(cmd);
+            (cmd_parts.push_back(std::forward<Args>(args)), ...);
+
+            // 编码并执行命令
+            auto encoded = m_encoder.encodeCommand(cmd_parts);
+            return executeCommand(std::move(encoded));
+        }
 
         // 基础Redis命令
         AsyncResult<std::expected<void, RedisError>> auth(const std::string& password);

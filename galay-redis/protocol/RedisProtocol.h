@@ -180,16 +180,92 @@ namespace galay::redis::protocol
         // 编码数组
         std::string encodeArray(const std::vector<std::string>& elements);
 
-        // 编码Redis命令 (特殊的数组格式)
-        std::string encodeCommand(const std::string& cmd, const std::vector<std::string>& args);
+        // 编码Redis命令 (特殊的数组格式) - 模板化版本
+        template<typename... Args>
+        std::string encodeCommand(const std::string& cmd, Args&&... args);
 
-        // 编码完整的Redis命令
-        std::string encodeCommand(const std::vector<std::string>& cmd_parts);
+        // 编码Redis命令 - 支持初始化列表参数
+        std::string encodeCommand(const std::string& cmd, std::initializer_list<std::string> args);
+
+        // 编码完整的Redis命令 - 模板化版本，支持任意容器
+        template<typename Container>
+        std::string encodeCommand(const Container& cmd_parts);
+
+        // 编码完整的Redis命令 - 支持初始化列表
+        std::string encodeCommand(std::initializer_list<std::string> cmd_parts);
+
+    private:
+        // 辅助函数：将参数转换为字符串
+        template<typename T>
+        std::string toString(T&& value);
+
+        // 辅助函数：递归构建命令参数
+        template<typename T, typename... Rest>
+        void buildCommandArgs(std::string& result, T&& first, Rest&&... rest);
 
         // RESP3扩展
         std::string encodeDouble(double value);
         std::string encodeBoolean(bool value);
     };
+
+    // 模板实现必须在头文件中
+    template<typename T>
+    std::string RespEncoder::toString(T&& value)
+    {
+        if constexpr (std::is_same_v<std::decay_t<T>, std::string> ||
+                      std::is_same_v<std::decay_t<T>, const char*> ||
+                      std::is_convertible_v<T, std::string_view>) {
+            return std::string(std::forward<T>(value));
+        } else if constexpr (std::is_integral_v<std::decay_t<T>>) {
+            return std::to_string(value);
+        } else if constexpr (std::is_floating_point_v<std::decay_t<T>>) {
+            return std::to_string(value);
+        } else {
+            // 对于其他类型，尝试转换为字符串
+            return std::string(value);
+        }
+    }
+
+    template<typename T, typename... Rest>
+    void RespEncoder::buildCommandArgs(std::string& result, T&& first, Rest&&... rest)
+    {
+        result += encodeBulkString(toString(std::forward<T>(first)));
+        if constexpr (sizeof...(rest) > 0) {
+            buildCommandArgs(result, std::forward<Rest>(rest)...);
+        }
+    }
+
+    template<typename... Args>
+    std::string RespEncoder::encodeCommand(const std::string& cmd, Args&&... args)
+    {
+        std::string result = "*" + std::to_string(1 + sizeof...(args)) + "\r\n";
+        result += encodeBulkString(cmd);
+        if constexpr (sizeof...(args) > 0) {
+            buildCommandArgs(result, std::forward<Args>(args)...);
+        }
+        return result;
+    }
+
+    template<typename Container>
+    std::string RespEncoder::encodeCommand(const Container& cmd_parts)
+    {
+        size_t size = 0;
+        if constexpr (requires { cmd_parts.size(); }) {
+            size = cmd_parts.size();
+        } else {
+            size = std::distance(std::begin(cmd_parts), std::end(cmd_parts));
+        }
+
+        if (size == 0) {
+            return "*0\r\n";
+        }
+
+        std::string result = "*" + std::to_string(size) + "\r\n";
+        for (const auto& part : cmd_parts) {
+            result += encodeBulkString(toString(part));
+        }
+        return result;
+    }
 
 } // namespace galay::redis::protocol
 
