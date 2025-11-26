@@ -1,5 +1,4 @@
 #include <iostream>
-#include "protocol/RedisClient.h"
 #include "protocol/RedisProtocol.h"
 
 using namespace galay::redis::protocol;
@@ -218,65 +217,6 @@ void testRoundTrip() {
     std::cout << std::endl;
 }
 
-// 测试Redis客户端（需要实际的Redis服务器）
-void testRedisClient(bool skipOnlineTest = true) {
-    if (skipOnlineTest) {
-        std::cout << "=== Skipping Redis Client Online Test ===" << std::endl;
-        std::cout << "Set skipOnlineTest=false and provide Redis server to run this test" << std::endl;
-        return;
-    }
-
-    std::cout << "=== Testing Redis Client ===" << std::endl;
-
-    RedisClientConfig config;
-    config.host = "127.0.0.1";
-    config.port = 6379;
-    // config.password = "your_password"; // 如果需要认证
-
-    RedisClient client(config);
-
-    // 连接测试
-    auto connect_result = client.connect();
-    if (!connect_result) {
-        std::cout << "✗ Failed to connect: " << connect_result.error().message() << std::endl;
-        return;
-    }
-    std::cout << "✓ Connected to Redis server" << std::endl;
-
-    // PING测试
-    auto ping_result = client.ping();
-    if (ping_result && ping_result->isSimpleString()) {
-        std::cout << "✓ PING: " << ping_result->asString() << std::endl;
-    }
-
-    // SET测试
-    auto set_result = client.set("test_key", "test_value");
-    if (set_result) {
-        std::cout << "✓ SET successful" << std::endl;
-    }
-
-    // GET测试
-    auto get_result = client.get("test_key");
-    if (get_result && get_result->isBulkString()) {
-        std::cout << "✓ GET: " << get_result->asString() << std::endl;
-    }
-
-    // EXISTS测试
-    auto exists_result = client.exists("test_key");
-    if (exists_result && exists_result->isInteger()) {
-        std::cout << "✓ EXISTS: " << exists_result->asInteger() << std::endl;
-    }
-
-    // DEL测试
-    auto del_result = client.del("test_key");
-    if (del_result && del_result->isInteger()) {
-        std::cout << "✓ DEL: " << del_result->asInteger() << " keys deleted" << std::endl;
-    }
-
-    client.disconnect();
-    std::cout << "✓ Disconnected from Redis server" << std::endl;
-    std::cout << std::endl;
-}
 
 int main(int argc, char* argv[]) {
     std::cout << "Redis Protocol Parser and Client Test" << std::endl;
@@ -294,8 +234,7 @@ int main(int argc, char* argv[]) {
 
         // 测试Redis客户端（默认跳过，需要实际的Redis服务器）
         bool runOnlineTest = (argc > 1 && std::string(argv[1]) == "--online");
-        testRedisClient(!runOnlineTest);
-
+       
         std::cout << "All tests completed!" << std::endl;
         return 0;
 

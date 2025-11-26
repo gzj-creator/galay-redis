@@ -33,168 +33,168 @@ namespace galay::redis
         /*
         * return : status
         */
-       std::expected<RedisValue, RedisError> selectDB(int32_t db_index);
+        std::expected<RedisValue, RedisError> selectDB(int32_t db_index);
         /*
         * return : status
         */
-       std::expected<RedisValue, RedisError> flushDB();
+        std::expected<RedisValue, RedisError> flushDB();
         /*
         * role: 切换版本
         * RESP2 return: array
         * RESP3 return: map
         */
-       std::expected<RedisValue, RedisError> switchVersion(int version);
+        std::expected<RedisValue, RedisError> switchVersion(int version);
         /*
         * return: integer(1, exist, 0, not exist)
         */
-       std::expected<RedisValue, RedisError> exist(const std::string &key);
+        std::expected<RedisValue, RedisError> exist(const std::string &key);
         /*
         * return: RedisValue
         */
-       std::expected<RedisValue, RedisError> get(const std::string& key);
+        std::expected<RedisValue, RedisError> get(const std::string& key);
         /*
         * return: status
         */
-       std::expected<RedisValue, RedisError> set(const std::string& key, const std::string& value);
+        std::expected<RedisValue, RedisError> set(const std::string& key, const std::string& value);
         /*
         * return: status
         */
         template <KVPair... KV>
-       std::expected<RedisValue, RedisError> mset(KV... pairs);
+        std::expected<RedisValue, RedisError> mset(KV... pairs);
         /*
         * return: RedisValue array
         */
         template<KeyType... Key>
-       std::expected<RedisValue, RedisError> mget(Key... keys);
+        std::expected<RedisValue, RedisError> mget(Key... keys);
         /*
         * return: integer
         */
-       std::expected<RedisValue, RedisError> del(const std::string &key);
+        std::expected<RedisValue, RedisError> del(const std::string &key);
         /*
         * return: status
         */
-       std::expected<RedisValue, RedisError> setEx(const std::string& key, int64_t seconds, const std::string& value);
+        std::expected<RedisValue, RedisError> setEx(const std::string& key, int64_t seconds, const std::string& value);
         /*
         * return: status
         */
-       std::expected<RedisValue, RedisError> psetEx(const std::string& key, int64_t milliseconds, const std::string& value); 
+        std::expected<RedisValue, RedisError> psetEx(const std::string& key, int64_t milliseconds, const std::string& value); 
         /*
         * return: integer
         */
-       std::expected<RedisValue, RedisError> incr(const std::string& key);
+        std::expected<RedisValue, RedisError> incr(const std::string& key);
         /*
         * return: integer
         */
-       std::expected<RedisValue, RedisError> incrBy(std::string key, int64_t value);
+        std::expected<RedisValue, RedisError> incrBy(std::string key, int64_t value);
         /*
         * return: integer
         */
-       std::expected<RedisValue, RedisError> decr(const std::string& key);
+        std::expected<RedisValue, RedisError> decr(const std::string& key);
         /*
         * return: RedisValue
         */
-       std::expected<RedisValue, RedisError> hget(const std::string& key, const std::string& field);
+        std::expected<RedisValue, RedisError> hget(const std::string& key, const std::string& field);
         /*
         * return: status
         */
-       std::expected<RedisValue, RedisError> hset(const std::string& key, const std::string& field, const std::string& value);
+        std::expected<RedisValue, RedisError> hset(const std::string& key, const std::string& field, const std::string& value);
         /*
         * return: integer
         */
         template <KeyType... Key>
-       std::expected<RedisValue, RedisError> hdel(const std::string& key, Key... fields);
+        std::expected<RedisValue, RedisError> hdel(const std::string& key, Key... fields);
         /*
         * return: integer
         */
         template <KeyType... Key>
-       std::expected<RedisValue, RedisError> hmget(const std::string& key, Key... field);
+        std::expected<RedisValue, RedisError> hmget(const std::string& key, Key... field);
         /*
         * return: integer
         */
         template<KVPair... KV>
-       std::expected<RedisValue, RedisError> hmset(const std::string& key, KV... fields);
+        std::expected<RedisValue, RedisError> hmset(const std::string& key, KV... fields);
         /*
         * return: RedisValue map or array
         */
-       std::expected<RedisValue, RedisError> hgetAll(const std::string& key);
+        std::expected<RedisValue, RedisError> hgetAll(const std::string& key);
         /*
         * return: integer
         */
-       std::expected<RedisValue, RedisError> hincrBy(const std::string& key, std::string field, int64_t value);
-        /*
-        * return: integer
-        */
-        template <ValType... Val>
-       std::expected<RedisValue, RedisError> lpush(const std::string& key, Val... values);
+        std::expected<RedisValue, RedisError> hincrBy(const std::string& key, std::string field, int64_t value);
         /*
         * return: integer
         */
         template <ValType... Val>
-       std::expected<RedisValue, RedisError> rpush(const std::string& key, Val... values);
+        std::expected<RedisValue, RedisError> lpush(const std::string& key, Val... values);
         /*
         * return: integer
         */
-       std::expected<RedisValue, RedisError> lLen(const std::string& key);
+        template <ValType... Val>
+        std::expected<RedisValue, RedisError> rpush(const std::string& key, Val... values);
+        /*
+        * return: integer
+        */
+        std::expected<RedisValue, RedisError> lLen(const std::string& key);
         /*
         * return: RedisValue array
         */
-       std::expected<RedisValue, RedisError> lrange(const std::string& key, int64_t start, int64_t end);
+        std::expected<RedisValue, RedisError> lrange(const std::string& key, int64_t start, int64_t end);
         /*
         * return: integer
         */
-       std::expected<RedisValue, RedisError> lrem(const std::string& key, const std::string& value, int64_t count);
+        std::expected<RedisValue, RedisError> lrem(const std::string& key, const std::string& value, int64_t count);
         /*
         * return: integer
         */
         template <ValType... Val>
-       std::expected<RedisValue, RedisError> sadd(const std::string& key, Val... members);
+        std::expected<RedisValue, RedisError> sadd(const std::string& key, Val... members);
         /*
         * return: RedisValue array
         */
-       std::expected<RedisValue, RedisError> smembers(const std::string& key);
+        std::expected<RedisValue, RedisError> smembers(const std::string& key);
         /*
         * return: integer
         */
         template <ValType... Val>
-       std::expected<RedisValue, RedisError> srem(const std::string& key, Val... members);
+        std::expected<RedisValue, RedisError> srem(const std::string& key, Val... members);
         /*
         * return: RedisValue array or set
         */
         template<KeyType... Key>
-       std::expected<RedisValue, RedisError> sinter(Key... keys);
+        std::expected<RedisValue, RedisError> sinter(Key... keys);
         /*
         * return: RedisValue array or set
         */
         template<KeyType... Key>
-       std::expected<RedisValue, RedisError> sunion(Key... keys);
+        std::expected<RedisValue, RedisError> sunion(Key... keys);
         /*
         * return: integer
         */
-       std::expected<RedisValue, RedisError> smove(const std::string& source, const std::string& destination, const std::string& member);
+        std::expected<RedisValue, RedisError> smove(const std::string& source, const std::string& destination, const std::string& member);
         /*
         * return: integer
         */
-       std::expected<RedisValue, RedisError> scard(const std::string& key);
+        std::expected<RedisValue, RedisError> scard(const std::string& key);
 
         /*
         * return: integer
         */
         template <ScoreValType... KV>
-       std::expected<RedisValue, RedisError> zadd(const std::string& key, KV... values);
+        std::expected<RedisValue, RedisError> zadd(const std::string& key, KV... values);
         /*
         * return: RedisValue array
         */
-       std::expected<RedisValue, RedisError> zrange(const std::string& key, uint32_t beg, uint32_t end);
+        std::expected<RedisValue, RedisError> zrange(const std::string& key, uint32_t beg, uint32_t end);
         /*
         * return: string or double
         */
-       std::expected<RedisValue, RedisError> zscore(const std::string& key, const std::string& member);
+        std::expected<RedisValue, RedisError> zscore(const std::string& key, const std::string& member);
         
         template <KeyType... Key>
-       std::expected<RedisValue, RedisError> zrem(const std::string& key, Key... members);
+        std::expected<RedisValue, RedisError> zrem(const std::string& key, Key... members);
 
 
-       std::expected<RedisValue, RedisError> redisCommand(const std::string& cmd);
+        std::expected<RedisValue, RedisError> redisCommand(const std::string& cmd);
 
         ~RedisSession();
     private:

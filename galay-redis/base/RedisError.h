@@ -26,7 +26,16 @@ namespace galay::redis
         REDIS_ERROR_TYPE_SEND_ERROR,                //发送数据错误
         REDIS_ERROR_TYPE_RECV_ERROR,                //接收数据错误
         REDIS_ERROR_TYPE_BUFFER_OVERFLOW_ERROR,     //缓冲区溢出
+        REDIS_ERROR_TYPE_NETWORK_ERROR,             //网络错误
+        REDIS_ERROR_TYPE_CONNECTION_CLOSED,         //连接已关闭
     };
+
+    // 为了兼容性，提供别名
+    using RedisErrorCode = RedisErrorType;
+
+    // 便捷的错误码常量
+    constexpr RedisErrorType NetworkError = REDIS_ERROR_TYPE_NETWORK_ERROR;
+    constexpr RedisErrorType ConnectionClosed = REDIS_ERROR_TYPE_CONNECTION_CLOSED;
 
 
     class RedisError
