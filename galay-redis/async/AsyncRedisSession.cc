@@ -1,30 +1,29 @@
 #include "AsyncRedisSession.h"
 #include "base/RedisLog.h"
+#include "galay/kernel/coroutine/CoSchedulerHandle.hpp"
 #include <galay/kernel/async/AsyncFactory.h>
 #include <galay/common/Error.h>
+#include <galay/utils/System.h>
+#include <regex>
 
 namespace galay::redis
 {
 
-    // ======================== 构造函数 ========================
-
     /**
-     * @brief 构造函数 - 从已连接的socket创建Redis会话
-     * @param socket 已经建立连接的TCP socket
-     * @param handle 协程调度器句柄
+     * @brief 默认构造函数
      */
-    AsyncRedisSession::AsyncRedisSession(AsyncTcpSocket&& socket, CoSchedulerHandle handle)
-        : m_socket(std::move(socket)), m_handle(handle)
+    AsyncRedisSession::AsyncRedisSession(CoSchedulerHandle handle)
+        : m_socket(), m_handle(handle)
     {
         // 预分配接收缓冲区，避免频繁内存分配
         m_recv_buffer.resize(BUFFER_SIZE);
     }
 
-    /**
+    /*
      * @brief 移动构造函数
      * @param other 要移动的源对象
      */
-    AsyncRedisSession::AsyncRedisSession(AsyncRedisSession&& other)
+    AsyncRedisSession::AsyncRedisSession(AsyncRedisSession&& other) noexcept
         : m_is_closed(other.m_is_closed)
         , m_socket(std::move(other.m_socket))
         , m_handle(other.m_handle)
@@ -35,6 +34,221 @@ namespace galay::redis
     {
         // 标记源对象为已关闭，防止其析构函数操作资源
         other.m_is_closed = true;
+    }
+
+    /**
+     * @brief 移动赋值运算符
+     * @param other 要移动的源对象
+     * @return 当前对象的引用
+     */
+    AsyncRedisSession& AsyncRedisSession::operator=(AsyncRedisSession&& other) noexcept
+    {
+        if (this != &other) {
+            m_is_closed = other.m_is_closed;
+            m_socket = std::move(other.m_socket);
+            m_handle = other.m_handle;
+            m_encoder = std::move(other.m_encoder);
+            m_parser = std::move(other.m_parser);
+            m_recv_buffer = std::move(other.m_recv_buffer);
+            m_buffer_pos = other.m_buffer_pos;
+            other.m_is_closed = true;
+        }
+        return *this;
+    }
+
+    // ======================== 连接方法 ========================
+
+    /**
+     * @brief 使用URL连接到Redis服务器
+     * @param url Redis连接URL，格式：redis://[username:password@]host:port[/db_index]
+     * @return 异步结果，成功返回void，失败返回RedisError
+     */
+    AsyncResult<std::expected<void, RedisError>>
+    AsyncRedisSession::connect(const std::string& url)
+    {
+        auto waiter = std::make_shared<AsyncWaiter<void, RedisError>>();
+
+        // 解析URL
+        std::regex pattern(R"(^redis://(?:([^:@]*)(?::([^@]*))?@)?([a-zA-Z0-9\-\.]+)(?::(\d+))?(?:/(\d+))?$)");
+        std::smatch matches;
+        std::string username, password, host;
+        int32_t port = 6379, db_index = 0;
+
+        if (std::regex_match(url, matches, pattern)) {
+            if (matches.size() > 1 && !matches[1].str().empty()) {
+                username = matches[1];
+            }
+            if (matches.size() > 2 && !matches[2].str().empty()) {
+                password = matches[2];
+            }
+            if (matches.size() > 3 && !matches[3].str().empty()) {
+                host = matches[3];
+            } else {
+                RedisLogError(m_logger->getSpdlogger(), "[Redis host is invalid]");
+                waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_HOST_INVALID_ERROR)));
+                return waiter->wait();
+            }
+            if (matches.size() > 4 && !matches[4].str().empty()) {
+                try {
+                    port = std::stoi(matches[4]);
+                } catch(const std::exception& e) {
+                    RedisLogError(m_logger->getSpdlogger(), "[Redis port is invalid]");
+                    waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_PORT_INVALID_ERROR)));
+                    return waiter->wait();
+                }
+            }
+            if (matches.size() > 5 && !matches[5].str().empty()) {
+                try {
+                    db_index = std::stoi(matches[5]);
+                } catch(const std::exception& e) {
+                    RedisLogError(m_logger->getSpdlogger(), "[Redis url is invalid]");
+                    waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_DB_INDEX_INVALID_ERROR)));
+                    return waiter->wait();
+                }
+            }
+        } else {
+            RedisLogError(m_logger->getSpdlogger(), "[Redis url is invalid]");
+            waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_URL_INVALID_ERROR)));
+            return waiter->wait();
+        }
+
+        // 解析主机地址
+        using namespace galay::utils;
+        std::string ip;
+        switch (checkAddressType(host))
+        {
+        case AddressType::IPv4:
+            ip = host;
+            break;
+        case AddressType::IPv6:
+            waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_ADDRESS_TYPE_INVALID_ERROR, "IPv6 is not supported")));
+            return waiter->wait();
+        case AddressType::Domain:
+        {
+            ip = getHostIPV4(host);
+            if (ip.empty()) {
+                RedisLogError(m_logger->getSpdlogger(), "[Get domain's IPV4 failed]");
+                waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_ADDRESS_TYPE_INVALID_ERROR)));
+                return waiter->wait();
+            }
+            break;
+        }
+        default:
+            RedisLogError(m_logger->getSpdlogger(), "[Unsupported address type]");
+            waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_ADDRESS_TYPE_INVALID_ERROR)));
+            return waiter->wait();
+        }
+
+        return connect(ip, port, username, password, db_index);
+    }
+
+    /**
+     * @brief 连接到Redis服务器（基础版本）
+     */
+    AsyncResult<std::expected<void, RedisError>>
+    AsyncRedisSession::connect(const std::string& ip, int32_t port,
+                                const std::string& username, const std::string& password)
+    {
+        return connect(ip, port, username, password, 0);
+    }
+
+    /**
+     * @brief 连接到Redis服务器并选择数据库
+     */
+    AsyncResult<std::expected<void, RedisError>>
+    AsyncRedisSession::connect(const std::string& ip, int32_t port,
+                                const std::string& username, const std::string& password,
+                                int32_t db_index)
+    {
+        return connect(ip, port, username, password, db_index, 2);
+    }
+
+    /**
+     * @brief 连接到Redis服务器并指定协议版本
+     */
+    AsyncResult<std::expected<void, RedisError>>
+    AsyncRedisSession::connect(const std::string& ip, int32_t port,
+                                const std::string& username, const std::string& password,
+                                int32_t db_index, int version)
+    {
+        auto waiter = std::make_shared<AsyncWaiter<void, RedisError>>();
+
+        waiter->appendTask([this](auto waiter, std::string host, int32_t port,
+                                  std::string username, std::string password,
+                                  int32_t db_index, int version) -> Coroutine<nil> {
+            // 处理localhost
+            if (host == "localhost") {
+                host = "127.0.0.1";
+            }
+
+            // 创建socket
+            m_socket = m_handle.getAsyncFactory().getTcpSocket();
+
+            // 初始化socket
+            if (auto result = m_socket.socket(); !result) {
+                RedisLogError(m_logger->getSpdlogger(), "[Failed to create socket: {}]", result.error().message());
+                waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_NETWORK_ERROR, "Failed to create socket")));
+                co_return nil();
+            }
+
+            // 连接到Redis服务器
+            Host redis_host(host, port);
+            auto connect_result = co_await m_socket.connect(redis_host);
+            if (!connect_result) {
+                RedisLogError(m_logger->getSpdlogger(), "[Redis connect to {}:{} failed: {}]", host, port, connect_result.error().message());
+                waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_NETWORK_ERROR, "Connection failed")));
+                co_return nil();
+            }
+
+            RedisLogInfo(m_logger->getSpdlogger(), "[Redis connect to {}:{}]", host, port);
+
+            // 认证
+            if (!password.empty()) {
+                std::expected<RedisValue, RedisError> auth_result;
+
+                if (version == 3) {
+                    // RESP3: HELLO 3 AUTH username password
+                    auth_result = co_await execute("HELLO", "3", "AUTH",
+                                                   username.empty() ? "default" : username,
+                                                   password);
+                } else {
+                    // RESP2: AUTH [username] password
+                    if (username.empty()) {
+                        auth_result = co_await execute("AUTH", password);
+                    } else {
+                        auth_result = co_await execute("AUTH", username, password);
+                    }
+                }
+
+                if (!auth_result || auth_result->isError()) {
+                    std::string error_msg = auth_result ? auth_result->toError() : "Authentication failure";
+                    RedisLogError(m_logger->getSpdlogger(), "[Authentication failure, error is {}]", error_msg);
+                    co_await close();
+                    waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_AUTH_ERROR, error_msg)));
+                    co_return nil();
+                }
+                RedisLogInfo(m_logger->getSpdlogger(), "[Authentication success]");
+            }
+
+            // 选择数据库
+            if (db_index != 0) {
+                auto select_result = co_await select(db_index);
+                if (!select_result || select_result->isError()) {
+                    std::string error_msg = select_result ? select_result->toError() : "Select database failed";
+                    RedisLogError(m_logger->getSpdlogger(), "[Select database {} failed, error is {}]", db_index, error_msg);
+                    co_await close();
+                    waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_DB_INDEX_INVALID_ERROR, error_msg)));
+                    co_return nil();
+                }
+                RedisLogInfo(m_logger->getSpdlogger(), "[Select database {}]", db_index);
+            }
+
+            // 连接成功
+            waiter->notify({});
+            co_return nil();
+        }(waiter, ip, port, username, password, db_index, version));
+
+        return waiter->wait();
     }
 
     // ======================== 核心内部接口 ========================
@@ -170,137 +384,40 @@ namespace galay::redis
         return waiter->wait();
     }
 
-    // ======================== 通用命令执行接口 ========================
-
-    /**
-     * @brief 执行单个命令（无参数）
-     * @param cmd 命令名称，如 "PING"
-     * @return 异步结果
-     */
-    AsyncResult<std::expected<RedisValue, RedisError>>
-    AsyncRedisSession::execute(const std::string& cmd)
-    {
-        std::vector<std::string> cmd_parts = {cmd};
-        return execute(cmd_parts);
-    }
-
-    /**
-     * @brief 执行带参数的命令
-     * @param cmd 命令名称，如 "GET"
-     * @param args 参数列表，如 {"mykey"}
-     * @return 异步结果
-     */
-    AsyncResult<std::expected<RedisValue, RedisError>>
-    AsyncRedisSession::execute(const std::string& cmd, const std::vector<std::string>& args)
-    {
-        // 检查会话是否已关闭
-        if (m_is_closed) {
-            auto waiter = std::make_shared<AsyncWaiter<RedisValue, RedisError>>();
-            waiter->notify(std::unexpected(RedisError(ConnectionClosed, "Session is closed")));
-            return waiter->wait();
-        }
-
-        // 构建命令参数列表
-        std::vector<std::string> cmd_parts;
-        cmd_parts.reserve(1 + args.size());
-        cmd_parts.push_back(cmd);
-        cmd_parts.insert(cmd_parts.end(), args.begin(), args.end());
-
-        // 编码并执行命令
-        auto encoded = m_encoder.encodeCommand(cmd_parts);
-        return executeCommand(std::move(encoded));
-    }
-
-    /**
-     * @brief 执行命令（使用命令部分数组）
-     * @param cmd_parts 命令和参数的数组，如 {"SET", "key", "value"}
-     * @return 异步结果
-     */
-    AsyncResult<std::expected<RedisValue, RedisError>>
-    AsyncRedisSession::execute(const std::vector<std::string>& cmd_parts)
-    {
-        // 检查会话是否已关闭
-        if (m_is_closed) {
-            auto waiter = std::make_shared<AsyncWaiter<RedisValue, RedisError>>();
-            waiter->notify(std::unexpected(RedisError(ConnectionClosed, "Session is closed")));
-            return waiter->wait();
-        }
-
-        // 编码并执行命令
-        auto encoded = m_encoder.encodeCommand(cmd_parts);
-        return executeCommand(std::move(encoded));
-    }
-
     // ======================== 基础Redis命令 ========================
 
     /**
      * @brief 使用密码认证（Redis 5.0之前版本）
      * @param password 密码
-     * @return 异步结果
+     * @return 异步结果，成功返回 SimpleString "OK"
      */
-    AsyncResult<std::expected<void, RedisError>>
+    AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::auth(const std::string& password)
     {
-        auto waiter = std::make_shared<AsyncWaiter<void, RedisError>>();
-
-        waiter->appendTask([this](auto waiter, auto* self, std::string pwd) -> Coroutine<nil> {
-            auto result = co_await self->execute("AUTH", pwd);  // 使用模板版本，避免创建 vector
-            if (!result) {
-                waiter->notify(std::unexpected(result.error()));
-            } else {
-                waiter->notify({});
-            }
-            co_return nil();
-        }(waiter, this, password));
-
-        return waiter->wait();
+        return execute("AUTH", password);
     }
 
     /**
      * @brief 使用用户名和密码认证（Redis 6.0+ ACL）
      * @param username 用户名
      * @param password 密码
-     * @return 异步结果
+     * @return 异步结果，成功返回 SimpleString "OK"
      */
-    AsyncResult<std::expected<void, RedisError>>
+    AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::auth(const std::string& username, const std::string& password)
     {
-        auto waiter = std::make_shared<AsyncWaiter<void, RedisError>>();
-
-        waiter->appendTask([this](auto waiter, auto* self, const std::string& user, const std::string& pwd) -> Coroutine<nil> {
-            auto result = co_await self->execute("AUTH", {user, pwd});
-            if (!result) {
-                waiter->notify(std::unexpected(result.error()));
-            } else {
-                waiter->notify({});
-            }
-            co_return nil();
-        }(waiter, this, username, password));
-
-        return waiter->wait();
+        return execute("AUTH", username, password);
     }
 
     /**
      * @brief 切换到指定的数据库
      * @param db_index 数据库索引（0-15，默认有16个数据库）
-     * @return 异步结果
+     * @return 异步结果，成功返回 SimpleString "OK"
      */
-    AsyncResult<std::expected<void, RedisError>>
+    AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::select(int32_t db_index)
     {
-        auto waiter = std::make_shared<AsyncWaiter<void, RedisError>>();
-
-        waiter->appendTask([](auto waiter, auto* self, int32_t db) -> Coroutine<nil> {
-            auto result = co_await self->execute("SELECT", {std::to_string(db)});
-            if (!result) {
-                waiter->notify(std::unexpected(result.error()));
-            } else {
-                waiter->notify({});
-            }
-            co_return nil();
-        }(waiter, this, db_index));
-
-        return waiter->wait();
+        return execute("SELECT", std::to_string(db_index));
     }
 
     /**
@@ -321,7 +438,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::echo(const std::string& message)
     {
-        return execute("ECHO", {message});
+        return execute("ECHO", message);
     }
 
     // ======================== String操作 ========================
@@ -334,7 +451,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::get(const std::string& key)
     {
-        return execute("GET", {key});
+        return execute("GET", key);
     }
 
     /**
@@ -346,7 +463,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::set(const std::string& key, const std::string& value)
     {
-        return execute("SET", {key, value});
+        return execute("SET", key, value);
     }
 
     /**
@@ -359,7 +476,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::setex(const std::string& key, int64_t seconds, const std::string& value)
     {
-        return execute("SETEX", {key, std::to_string(seconds), value});
+        return execute("SETEX", key, std::to_string(seconds), value);
     }
 
     /**
@@ -370,7 +487,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::del(const std::string& key)
     {
-        return execute("DEL", {key});
+        return execute("DEL", key);
     }
 
     /**
@@ -381,7 +498,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::exists(const std::string& key)
     {
-        return execute("EXISTS", {key});
+        return execute("EXISTS", key);
     }
 
     /**
@@ -392,7 +509,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::incr(const std::string& key)
     {
-        return execute("INCR", {key});
+        return execute("INCR", key);
     }
 
     /**
@@ -403,7 +520,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::decr(const std::string& key)
     {
-        return execute("DECR", {key});
+        return execute("DECR", key);
     }
 
     // ======================== Hash操作 ========================
@@ -417,7 +534,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::hget(const std::string& key, const std::string& field)
     {
-        return execute("HGET", {key, field});
+        return execute("HGET", key, field);
     }
 
     /**
@@ -430,7 +547,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::hset(const std::string& key, const std::string& field, const std::string& value)
     {
-        return execute("HSET", {key, field, value});
+        return execute("HSET", key, field, value);
     }
 
     /**
@@ -442,7 +559,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::hdel(const std::string& key, const std::string& field)
     {
-        return execute("HDEL", {key, field});
+        return execute("HDEL", key, field);
     }
 
     /**
@@ -453,7 +570,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::hgetAll(const std::string& key)
     {
-        return execute("HGETALL", {key});
+        return execute("HGETALL", key);
     }
 
     // ======================== List操作 ========================
@@ -467,7 +584,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::lpush(const std::string& key, const std::string& value)
     {
-        return execute("LPUSH", {key, value});
+        return execute("LPUSH", key, value);
     }
 
     /**
@@ -479,7 +596,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::rpush(const std::string& key, const std::string& value)
     {
-        return execute("RPUSH", {key, value});
+        return execute("RPUSH", key, value);
     }
 
     /**
@@ -490,7 +607,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::lpop(const std::string& key)
     {
-        return execute("LPOP", {key});
+        return execute("LPOP", key);
     }
 
     /**
@@ -501,7 +618,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::rpop(const std::string& key)
     {
-        return execute("RPOP", {key});
+        return execute("RPOP", key);
     }
 
     /**
@@ -512,7 +629,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::llen(const std::string& key)
     {
-        return execute("LLEN", {key});
+        return execute("LLEN", key);
     }
 
     /**
@@ -525,7 +642,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::lrange(const std::string& key, int64_t start, int64_t stop)
     {
-        return execute("LRANGE", {key, std::to_string(start), std::to_string(stop)});
+        return execute("LRANGE", key, std::to_string(start), std::to_string(stop));
     }
 
     // ======================== Set操作 ========================
@@ -539,7 +656,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::sadd(const std::string& key, const std::string& member)
     {
-        return execute("SADD", {key, member});
+        return execute("SADD", key, member);
     }
 
     /**
@@ -551,7 +668,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::srem(const std::string& key, const std::string& member)
     {
-        return execute("SREM", {key, member});
+        return execute("SREM", key, member);
     }
 
     /**
@@ -562,7 +679,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::smembers(const std::string& key)
     {
-        return execute("SMEMBERS", {key});
+        return execute("SMEMBERS", key);
     }
 
     /**
@@ -573,7 +690,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::scard(const std::string& key)
     {
-        return execute("SCARD", {key});
+        return execute("SCARD", key);
     }
 
     // ======================== Sorted Set操作 ========================
@@ -588,7 +705,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::zadd(const std::string& key, double score, const std::string& member)
     {
-        return execute("ZADD", {key, std::to_string(score), member});
+        return execute("ZADD", key, std::to_string(score), member);
     }
 
     /**
@@ -600,7 +717,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::zrem(const std::string& key, const std::string& member)
     {
-        return execute("ZREM", {key, member});
+        return execute("ZREM", key, member);
     }
 
     /**
@@ -613,7 +730,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::zrange(const std::string& key, int64_t start, int64_t stop)
     {
-        return execute("ZRANGE", {key, std::to_string(start), std::to_string(stop)});
+        return execute("ZRANGE", key, std::to_string(start), std::to_string(stop));
     }
 
     /**
@@ -625,7 +742,7 @@ namespace galay::redis
     AsyncResult<std::expected<RedisValue, RedisError>>
     AsyncRedisSession::zscore(const std::string& key, const std::string& member)
     {
-        return execute("ZSCORE", {key, member});
+        return execute("ZSCORE", key, member);
     }
 
     // ======================== 连接管理 ========================

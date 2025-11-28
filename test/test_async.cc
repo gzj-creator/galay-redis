@@ -12,33 +12,20 @@ using namespace galay::redis;
 Coroutine<nil> testAsyncRedis(CoSchedulerHandle handle) {
     std::cout << "Testing asynchronous Redis operations..." << std::endl;
 
-    // 创建异步TCP socket
-    AsyncTcpSocket socket = handle.getAsyncFactory().getTcpSocket();
+    std::cout << "Connected successfully" << std::endl;
 
-    if(auto result = socket.socket(); !result) {
-        std::cout << "Failed to get socket: " << result.error().message() << std::endl;
-        co_return nil();
-    }
-    // 连接到Redis服务器
+    // 创建异步Redis会话
+    AsyncRedisSession session(handle);
+
+
+    // 认证
     std::cout << "Connecting to Redis server..." << std::endl;
-    Host host("140.143.142.251", 6379);
-    auto connect_result = co_await socket.connect(host);
+    auto connect_result = co_await session.connect("redis://:galay123@140.143.142.251:6379");
     if (!connect_result) {
         std::cout << "Failed to connect: " << connect_result.error().message() << std::endl;
         co_return nil();
     }
-    std::cout << "Connected successfully" << std::endl;
-
-    // 创建异步Redis会话
-    AsyncRedisSession session(std::move(socket), handle);
-
-    // 认证
-    std::cout << "Authenticating..." << std::endl;
-    auto auth_result = co_await session.auth("galay123");
-    if (!auth_result) {
-        std::cout << "Failed to authenticate: " << auth_result.error().message() << std::endl;
-        co_return nil();
-    }
+    
     std::cout << "Authenticated successfully" << std::endl;
 
     // Test SET
