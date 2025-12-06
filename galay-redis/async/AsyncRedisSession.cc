@@ -1,6 +1,12 @@
 #include "AsyncRedisSession.h"
+#include "base/RedisError.h"
 #include "base/RedisLog.h"
+#include "base/RedisValue.h"
+#include "galay/common/Buffer.h"
+#include "galay/kernel/async/Bytes.h"
 #include "galay/kernel/coroutine/CoSchedulerHandle.hpp"
+#include "galay/kernel/coroutine/Waker.h"
+#include <cstddef>
 #include <galay/kernel/async/AsyncFactory.h>
 #include <galay/common/Error.h>
 #include <galay/utils/System.h>
@@ -10,13 +16,13 @@ namespace galay::redis
 {
 
     /**
-     * @brief 默认构造函数
+     * @brief 带配置的构造函数
+     * @param handle 协程调度器句柄
+     * @param config 异步Redis配置对象
      */
-    AsyncRedisSession::AsyncRedisSession(CoSchedulerHandle handle)
-        : m_socket(), m_handle(handle)
+    AsyncRedisSession::AsyncRedisSession(CoSchedulerHandle handle, AsyncRedisConfig config)
+        : m_socket(), m_handle(handle), m_config(config)
     {
-        // 预分配接收缓冲区，避免频繁内存分配
-        m_recv_buffer.resize(BUFFER_SIZE);
     }
 
     /*
@@ -29,8 +35,6 @@ namespace galay::redis
         , m_handle(other.m_handle)
         , m_encoder(std::move(other.m_encoder))
         , m_parser(std::move(other.m_parser))
-        , m_recv_buffer(std::move(other.m_recv_buffer))
-        , m_buffer_pos(other.m_buffer_pos)
     {
         // 标记源对象为已关闭，防止其析构函数操作资源
         other.m_is_closed = true;
@@ -49,8 +53,6 @@ namespace galay::redis
             m_handle = other.m_handle;
             m_encoder = std::move(other.m_encoder);
             m_parser = std::move(other.m_parser);
-            m_recv_buffer = std::move(other.m_recv_buffer);
-            m_buffer_pos = other.m_buffer_pos;
             other.m_is_closed = true;
         }
         return *this;
@@ -63,7 +65,7 @@ namespace galay::redis
      * @param url Redis连接URL，格式：redis://[username:password@]host:port[/db_index]
      * @return 异步结果，成功返回void，失败返回RedisError
      */
-    AsyncResult<std::expected<void, RedisError>>
+    RedisVoidResult
     AsyncRedisSession::connect(const std::string& url)
     {
         auto waiter = std::make_shared<AsyncWaiter<void, RedisError>>();
@@ -145,7 +147,7 @@ namespace galay::redis
     /**
      * @brief 连接到Redis服务器（基础版本）
      */
-    AsyncResult<std::expected<void, RedisError>>
+    RedisVoidResult
     AsyncRedisSession::connect(const std::string& ip, int32_t port,
                                 const std::string& username, const std::string& password)
     {
@@ -155,7 +157,7 @@ namespace galay::redis
     /**
      * @brief 连接到Redis服务器并选择数据库
      */
-    AsyncResult<std::expected<void, RedisError>>
+    RedisVoidResult
     AsyncRedisSession::connect(const std::string& ip, int32_t port,
                                 const std::string& username, const std::string& password,
                                 int32_t db_index)
@@ -166,7 +168,7 @@ namespace galay::redis
     /**
      * @brief 连接到Redis服务器并指定协议版本
      */
-    AsyncResult<std::expected<void, RedisError>>
+    RedisVoidResult
     AsyncRedisSession::connect(const std::string& ip, int32_t port,
                                 const std::string& username, const std::string& password,
                                 int32_t db_index, int version)
@@ -186,7 +188,8 @@ namespace galay::redis
 
             // 初始化socket
             if (auto result = m_socket.socket(); !result) {
-                RedisLogError(m_logger->getSpdlogger(), "[Failed to create socket: {}]", result.error().message());
+                auto error_msg = result.error().message();
+                RedisLogError(m_logger->getSpdlogger(), "[Failed to create socket: {}]", error_msg);
                 waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_NETWORK_ERROR, "Failed to create socket")));
                 co_return nil();
             }
@@ -201,10 +204,13 @@ namespace galay::redis
             }
 
             RedisLogInfo(m_logger->getSpdlogger(), "[Redis connect to {}:{}]", host, port);
+            
+            m_handle.spawn(receiveReply());
+            m_handle.spawn(sendCommand());
 
             // 认证
             if (!password.empty()) {
-                std::expected<RedisValue, RedisError> auth_result;
+                std::expected<std::vector<RedisValue>, RedisError> auth_result;
 
                 if (version == 3) {
                     // RESP3: HELLO 3 AUTH username password
@@ -220,8 +226,8 @@ namespace galay::redis
                     }
                 }
 
-                if (!auth_result || auth_result->isError()) {
-                    std::string error_msg = auth_result ? auth_result->toError() : "Authentication failure";
+                if (!auth_result || auth_result->empty() || auth_result->front().isError()) {
+                    std::string error_msg = auth_result ? auth_result->front().toError() : "Authentication failure";
                     RedisLogError(m_logger->getSpdlogger(), "[Authentication failure, error is {}]", error_msg);
                     co_await close();
                     waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_AUTH_ERROR, error_msg)));
@@ -233,8 +239,8 @@ namespace galay::redis
             // 选择数据库
             if (db_index != 0) {
                 auto select_result = co_await select(db_index);
-                if (!select_result || select_result->isError()) {
-                    std::string error_msg = select_result ? select_result->toError() : "Select database failed";
+                if (!select_result || select_result->front().isError()) {
+                    std::string error_msg = select_result ? select_result->front().toError() : "Select database failed";
                     RedisLogError(m_logger->getSpdlogger(), "[Select database {} failed, error is {}]", db_index, error_msg);
                     co_await close();
                     waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_DB_INDEX_INVALID_ERROR, error_msg)));
@@ -258,26 +264,29 @@ namespace galay::redis
      * @param encoded_cmd RESP协议编码后的命令字符串
      * @return 异步结果，成功时为void，失败时包含错误信息
      */
-    AsyncResult<std::expected<void, RedisError>>
-    AsyncRedisSession::sendCommand(const std::string& encoded_cmd)
+    Coroutine<nil>
+    AsyncRedisSession::sendCommand()
     {
-        auto waiter = std::make_shared<AsyncWaiter<void, RedisError>>();
-
-        // 创建协程任务来执行异步发送
-        waiter->appendTask([](auto waiter, auto& socket, const std::string& cmd) -> Coroutine<nil> {
-            // co_await等待socket发送完成
-            auto result = co_await socket.send(Bytes(cmd.data(), cmd.size()));
-            if (!result) {
-                // 发送失败，通知错误
-                waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_NETWORK_ERROR, "Failed to send command")));
-            } else {
-                // 发送成功
-                waiter->notify({});
+        while (true) {
+            auto res_op = co_await m_channel.recv();
+            if(res_op.has_value()) {
+                auto [encoded_cmd, batch_size, waiter] = res_op.value();
+                Bytes bytes = Bytes::fromString(encoded_cmd);
+                do {
+                    auto result = co_await m_socket.send(std::move(bytes));
+                    if (!result) {
+                        waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_NETWORK_ERROR, result.error().message())));
+                        break;
+                    }
+                    if(result.value().empty()) {
+                        m_waiters.push_back({batch_size, waiter});
+                        break;
+                    }
+                    bytes = std::move(result.value());
+                } while(true);
             }
-            co_return nil();
-        }(waiter, m_socket, encoded_cmd));
-
-        return waiter->wait();
+        }
+        co_return nil();
     }
 
     /**
@@ -289,62 +298,86 @@ namespace galay::redis
      * 2. 如果数据不完整，继续从socket接收更多数据
      * 3. 解析成功后，将剩余数据前移到缓冲区开头
      * 4. 支持缓冲区自动扩容
+     * 5. 如果配置了recv超时，会在接收时使用 TimerGenerator 包装
      */
-    AsyncResult<std::expected<protocol::RedisReply, RedisError>>
+    Coroutine<nil>
     AsyncRedisSession::receiveReply()
     {
-        auto waiter = std::make_shared<AsyncWaiter<protocol::RedisReply, RedisError>>();
-
-        waiter->appendTask([this](auto waiter, auto& socket, auto& parser, auto& recv_buffer, size_t& buffer_pos) -> Coroutine<nil> {
+        RingBuffer buffer(m_config.buffer_size);
+        std::vector<RedisValue> results;
+        
+        while (true) {
+            // 先接收数据
+            auto [data, size] = buffer.getWriteBuffer();
+            auto res = co_await m_socket.recv(data, size);
+            if(!res) {
+                if(m_waiters.empty()) {
+                    co_return nil();
+                }
+                // 接收失败，通知当前批次的waiter
+                // 添加错误到results，并更新batch_size
+                auto [batch_size, waiter] = m_waiters.front();  // 拷贝一份
+                results.push_back(RedisValue::fromError(res.error().message()));
+                
+                // 更新deque中的batch_size
+                m_waiters.front().first--;
+                if(m_waiters.front().first == 0) {
+                    m_waiters.pop_front();
+                    waiter->notify(std::unexpected<RedisError>(RedisError(RedisErrorType::REDIS_ERROR_TYPE_NETWORK_ERROR, res.error().message())));
+                    results.clear();  // 清空results准备下一个批次
+                }
+                continue;
+            }
+            
+            auto& bytes = res.value();
+            size_t length = bytes.size();
+            buffer.produce(length);
+            
+            // 处理缓冲区中的所有完整响应（处理粘包）
             while (true) {
-                // 检查缓冲区中是否有完整的响应
-                if (buffer_pos > 0) {
-                    auto parse_result = parser.parse(recv_buffer.data(), buffer_pos);
-                    if (parse_result.has_value()) {
-                        // 解析成功，获取消耗的字节数和解析结果
-                        auto [consumed, reply] = parse_result.value();
-                        // 将未处理的剩余数据前移
-                        if (consumed < buffer_pos) {
-                            std::memmove(recv_buffer.data(),
-                                       recv_buffer.data() + consumed,
-                                       buffer_pos - consumed);
-                        }
-                        buffer_pos -= consumed;
-                        // 通知等待者解析结果
-                        waiter->notify(std::move(reply));
-                        co_return nil();
+                if (m_waiters.empty()) {
+                    // 没有等待的请求，退出解析循环
+                    break;
+                }
+                
+                auto [reply_data, reply_length] = buffer.getReadBuffer();
+                auto parse_result = m_parser.parse(reply_data, reply_length);
+                
+                if(parse_result) {
+                    // 解析成功
+                    auto [batch_size, waiter] = m_waiters.front();  // 拷贝一份
+                    results.push_back(RedisValue(parse_result.value().second));
+                    buffer.consume(parse_result.value().first);
+                    
+                    // 更新deque中的batch_size
+                    m_waiters.front().first--;
+                    if(m_waiters.front().first == 0) {
+                        m_waiters.pop_front();
+                        waiter->notify(std::expected<std::vector<RedisValue>, RedisError>(std::move(results)));
+                        results.clear();  // 清空results准备下一个批次
                     }
-                    // 数据不完整，继续接收
-                }
-                // 从socket接收更多数据到缓冲区当前位置之后
-                auto bytes = co_await socket.recv(recv_buffer.data() + buffer_pos,
-                                                 recv_buffer.size() - buffer_pos);
-                if (!bytes) {
-                    // 接收失败
-                    waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_NETWORK_ERROR, "Failed to receive data")));
-                    co_return nil();
-                }
-
-                if (bytes.value().size() == 0) {
-                    // 连接被服务器关闭
-                    waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED, "Connection closed by server")));
-                    co_return nil();
-                }
-
-                // 更新缓冲区数据位置
-                buffer_pos += bytes.value().size();
-
-                // 如果缓冲区满了，自动扩容（翻倍）
-                if (buffer_pos >= recv_buffer.size()) {
-                    recv_buffer.resize(recv_buffer.size() * 2);
+                    // 继续尝试解析缓冲区中的下一个响应
+                } else if(parse_result.error() == protocol::ParseError::Incomplete) {
+                    // 数据不完整，需要接收更多数据
+                    break;
+                } else {
+                    // 解析错误（格式错误等）
+                    auto [batch_size, waiter] = m_waiters.front();  // 拷贝一份
+                    results.push_back(RedisValue::fromError("Failed to parse response"));
+                    
+                    // 更新deque中的batch_size
+                    m_waiters.front().first--;
+                    if(m_waiters.front().first == 0) {
+                        m_waiters.pop_front();
+                        waiter->notify(std::expected<std::vector<RedisValue>, RedisError>(std::move(results)));
+                        results.clear();  // 清空results准备下一个批次
+                    }
+                    break;
                 }
             }
-            co_return nil();
-        }(waiter, m_socket, m_parser, m_recv_buffer, m_buffer_pos));
-
-        return waiter->wait();
+        }   
+        co_return nil();
     }
-
     /**
      * @brief 执行一个完整的请求-响应周期
      * @param encoded_cmd 已编码的命令字符串
@@ -355,32 +388,11 @@ namespace galay::redis
      * 2. 接收服务器响应
      * 3. 将协议层的RedisReply转换为业务层的RedisValue
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::executeCommand(std::string&& encoded_cmd)
     {
-        auto waiter = std::make_shared<AsyncWaiter<RedisValue, RedisError>>();
-
-        waiter->appendTask([this](auto waiter, auto* self, std::string cmd) -> Coroutine<nil> {
-            // 第一步：发送命令（直接 co_await，不创建中间 waiter）
-            auto send_result = co_await self->sendCommand(cmd);
-            if (!send_result) {
-                // 发送失败，直接返回错误
-                waiter->notify(std::unexpected(send_result.error()));
-                co_return nil();
-            }
-            // 第二步：接收响应（直接 co_await，不创建中间 waiter）
-            auto recv_result = co_await self->receiveReply();
-            if (!recv_result) {
-                // 接收失败，返回错误
-                waiter->notify(std::unexpected(recv_result.error()));
-                co_return nil();
-            }
-            // 第三步：将协议层RedisReply转换为业务层RedisValue
-            RedisValue value(recv_result.value());
-            waiter->notify(std::move(value));
-            co_return nil();
-        }(waiter, this, std::move(encoded_cmd)));
-
+        auto waiter = std::make_shared<AsyncWaiter<std::vector<RedisValue>, RedisError>>();
+        m_channel.send({encoded_cmd, 1, waiter});
         return waiter->wait();
     }
 
@@ -391,7 +403,7 @@ namespace galay::redis
      * @param password 密码
      * @return 异步结果，成功返回 SimpleString "OK"
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::auth(const std::string& password)
     {
         return execute("AUTH", password);
@@ -403,7 +415,7 @@ namespace galay::redis
      * @param password 密码
      * @return 异步结果，成功返回 SimpleString "OK"
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::auth(const std::string& username, const std::string& password)
     {
         return execute("AUTH", username, password);
@@ -414,7 +426,7 @@ namespace galay::redis
      * @param db_index 数据库索引（0-15，默认有16个数据库）
      * @return 异步结果，成功返回 SimpleString "OK"
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::select(int32_t db_index)
     {
         return execute("SELECT", std::to_string(db_index));
@@ -424,8 +436,8 @@ namespace galay::redis
      * @brief 测试连接是否正常
      * @return 异步结果，通常返回 "PONG"
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
-    AsyncRedisSession::ping()
+    RedisResult
+    AsyncRedisSession::ping(AsyncRedisConfig config)
     {
         return execute("PING");
     }
@@ -435,7 +447,7 @@ namespace galay::redis
      * @param message 要回显的消息
      * @return 异步结果，返回相同的消息
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::echo(const std::string& message)
     {
         return execute("ECHO", message);
@@ -448,7 +460,7 @@ namespace galay::redis
      * @param key 键名
      * @return 异步结果，键存在时返回值，不存在时返回null
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::get(const std::string& key)
     {
         return execute("GET", key);
@@ -460,7 +472,7 @@ namespace galay::redis
      * @param value 要设置的值
      * @return 异步结果，通常返回 "OK"
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::set(const std::string& key, const std::string& value)
     {
         return execute("SET", key, value);
@@ -473,7 +485,7 @@ namespace galay::redis
      * @param value 要设置的值
      * @return 异步结果，通常返回 "OK"
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::setex(const std::string& key, int64_t seconds, const std::string& value)
     {
         return execute("SETEX", key, std::to_string(seconds), value);
@@ -484,7 +496,7 @@ namespace galay::redis
      * @param key 键名
      * @return 异步结果，返回删除的键数量（0或1）
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::del(const std::string& key)
     {
         return execute("DEL", key);
@@ -495,7 +507,7 @@ namespace galay::redis
      * @param key 键名
      * @return 异步结果，存在返回1，不存在返回0
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::exists(const std::string& key)
     {
         return execute("EXISTS", key);
@@ -506,7 +518,7 @@ namespace galay::redis
      * @param key 键名
      * @return 异步结果，返回增加后的值
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::incr(const std::string& key)
     {
         return execute("INCR", key);
@@ -517,7 +529,7 @@ namespace galay::redis
      * @param key 键名
      * @return 异步结果，返回减少后的值
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::decr(const std::string& key)
     {
         return execute("DECR", key);
@@ -531,7 +543,7 @@ namespace galay::redis
      * @param field 字段名
      * @return 异步结果，返回字段的值，不存在返回null
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::hget(const std::string& key, const std::string& field)
     {
         return execute("HGET", key, field);
@@ -544,7 +556,7 @@ namespace galay::redis
      * @param value 字段值
      * @return 异步结果，新字段返回1，更新返回0
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::hset(const std::string& key, const std::string& field, const std::string& value)
     {
         return execute("HSET", key, field, value);
@@ -556,7 +568,7 @@ namespace galay::redis
      * @param field 要删除的字段名
      * @return 异步结果，返回删除的字段数量
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::hdel(const std::string& key, const std::string& field)
     {
         return execute("HDEL", key, field);
@@ -567,7 +579,7 @@ namespace galay::redis
      * @param key 哈希表的键名
      * @return 异步结果，返回字段名和值的数组
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::hgetAll(const std::string& key)
     {
         return execute("HGETALL", key);
@@ -581,7 +593,7 @@ namespace galay::redis
      * @param value 要插入的值
      * @return 异步结果，返回列表的长度
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::lpush(const std::string& key, const std::string& value)
     {
         return execute("LPUSH", key, value);
@@ -593,7 +605,7 @@ namespace galay::redis
      * @param value 要插入的值
      * @return 异步结果，返回列表的长度
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::rpush(const std::string& key, const std::string& value)
     {
         return execute("RPUSH", key, value);
@@ -604,7 +616,7 @@ namespace galay::redis
      * @param key 列表的键名
      * @return 异步结果，返回弹出的元素，列表空时返回null
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::lpop(const std::string& key)
     {
         return execute("LPOP", key);
@@ -615,7 +627,7 @@ namespace galay::redis
      * @param key 列表的键名
      * @return 异步结果，返回弹出的元素，列表空时返回null
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::rpop(const std::string& key)
     {
         return execute("RPOP", key);
@@ -626,7 +638,7 @@ namespace galay::redis
      * @param key 列表的键名
      * @return 异步结果，返回列表长度
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::llen(const std::string& key)
     {
         return execute("LLEN", key);
@@ -639,7 +651,7 @@ namespace galay::redis
      * @param stop 结束索引
      * @return 异步结果，返回指定范围的元素数组
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::lrange(const std::string& key, int64_t start, int64_t stop)
     {
         return execute("LRANGE", key, std::to_string(start), std::to_string(stop));
@@ -653,7 +665,7 @@ namespace galay::redis
      * @param member 要添加的成员
      * @return 异步结果，返回添加的成员数量（0表示已存在）
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::sadd(const std::string& key, const std::string& member)
     {
         return execute("SADD", key, member);
@@ -665,7 +677,7 @@ namespace galay::redis
      * @param member 要移除的成员
      * @return 异步结果，返回移除的成员数量
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::srem(const std::string& key, const std::string& member)
     {
         return execute("SREM", key, member);
@@ -676,7 +688,7 @@ namespace galay::redis
      * @param key 集合的键名
      * @return 异步结果，返回所有成员的数组
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::smembers(const std::string& key)
     {
         return execute("SMEMBERS", key);
@@ -687,7 +699,7 @@ namespace galay::redis
      * @param key 集合的键名
      * @return 异步结果，返回集合大小
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::scard(const std::string& key)
     {
         return execute("SCARD", key);
@@ -702,7 +714,7 @@ namespace galay::redis
      * @param member 要添加的成员
      * @return 异步结果，返回添加的成员数量（0表示已存在且更新了分数）
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::zadd(const std::string& key, double score, const std::string& member)
     {
         return execute("ZADD", key, std::to_string(score), member);
@@ -714,7 +726,7 @@ namespace galay::redis
      * @param member 要移除的成员
      * @return 异步结果，返回移除的成员数量
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::zrem(const std::string& key, const std::string& member)
     {
         return execute("ZREM", key, member);
@@ -727,7 +739,7 @@ namespace galay::redis
      * @param stop 结束索引
      * @return 异步结果，返回指定范围的成员数组
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::zrange(const std::string& key, int64_t start, int64_t stop)
     {
         return execute("ZRANGE", key, std::to_string(start), std::to_string(stop));
@@ -739,10 +751,43 @@ namespace galay::redis
      * @param member 成员名
      * @return 异步结果，返回成员的分数，不存在返回null
      */
-    AsyncResult<std::expected<RedisValue, RedisError>>
+    RedisResult
     AsyncRedisSession::zscore(const std::string& key, const std::string& member)
     {
         return execute("ZSCORE", key, member);
+    }
+
+
+    // ======================== Pipeline批量操作 ========================
+
+    RedisResult
+    AsyncRedisSession::pipeline(const std::vector<std::vector<std::string>>& commands)
+    {
+        // 检查会话是否已关闭
+        if (m_is_closed) {
+            return {std::unexpected<RedisError>(RedisError(RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED, "Session is closed"))};
+        }
+
+        // 检查命令列表是否为空
+        if (commands.empty()) {
+            return {std::expected<std::vector<RedisValue>, RedisError>(std::vector<RedisValue>())};
+        }
+
+        // 编码所有命令为一个大的字符串
+        std::string batch_encoded;
+        for (const auto& cmd_parts : commands) {
+            if (cmd_parts.empty()) {
+                auto waiter = std::make_shared<AsyncWaiter<std::vector<RedisValue>, RedisError>>();
+                waiter->notify(std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_COMMAND_ERROR, "Empty command in pipeline")));
+                return waiter->wait();
+            }
+            batch_encoded += m_encoder.encodeCommand(cmd_parts);
+        }
+
+        // 发送批量命令
+        auto waiter = std::make_shared<AsyncWaiter<std::vector<RedisValue>, RedisError>>();
+        m_channel.send({std::move(batch_encoded), static_cast<int32_t>(commands.size()), waiter});
+        return waiter->wait();
     }
 
     // ======================== 连接管理 ========================

@@ -19,6 +19,9 @@ namespace galay::redis
         RedisValue(const RedisValue&) = delete;
         RedisValue& operator=(const RedisValue&) = delete;
 
+        // 静态工厂方法
+        static RedisValue fromError(const std::string& error_msg);
+
         // RESP2
         bool isNull();
         bool isStatus();

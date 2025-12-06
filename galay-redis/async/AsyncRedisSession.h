@@ -1,18 +1,24 @@
 #ifndef GALAY_REDIS_ASYNC_SESSION_H
 #define GALAY_REDIS_ASYNC_SESSION_H
 
+#include <cstdint>
 #include <galay/kernel/async/Socket.h>
 #include <galay/kernel/coroutine/CoSchedulerHandle.hpp>
 #include <galay/kernel/coroutine/Result.hpp>
 #include <galay/kernel/coroutine/AsyncWaiter.hpp>
+#include <galay/kernel/async/TimerGenerator.h>
 #include <galay/common/Base.h>
+#include <galay/kernel/concurrency/MpscChannel.h>
+#include <memory>
 #include <string>
 #include <expected>
+#include <tuple>
+#include <utility>
 #include <vector>
-#include "../base/RedisError.h"
-#include "../base/RedisValue.h"
-#include "../protocol/RedisProtocol.h"
-#include "galay/common/Log.h"
+#include "galay-redis/base/RedisError.h"
+#include "galay-redis/base/RedisValue.h"
+#include "galay-redis/protocol/RedisProtocol.h"
+#include "AsyncRedisConfig.h"
 
 namespace galay::redis
 {
@@ -29,11 +35,17 @@ namespace galay::redis
     template<typename T, typename E>
     using AsyncWaiter = galay::AsyncWaiter<T, E>;
 
-    // 异步Redis会话类 - 类似 HttpConnection 的设计模式
+    // 类型别名简化
+    using RedisResult = AsyncResult<std::expected<std::vector<RedisValue>, RedisError>>;
+    using RedisVoidResult = AsyncResult<std::expected<void, RedisError>>;
+
+    // 异步Redis会话类 - 在同一CoSchedulerHandle下安全，非线程安全
     class AsyncRedisSession
     {
+        using AsyncRedisBatchTuple = std::tuple<std::string, int32_t, std::shared_ptr<AsyncWaiter<std::vector<RedisValue>, RedisError>>>;
+        using AsyncRedisBatchPair = std::pair<int32_t, std::shared_ptr<AsyncWaiter<std::vector<RedisValue>, RedisError>>>;
     public:
-        AsyncRedisSession(CoSchedulerHandle handle);
+        AsyncRedisSession(CoSchedulerHandle handle, AsyncRedisConfig config = AsyncRedisConfig::noTimeout());
         // 移动构造和赋值
         AsyncRedisSession(AsyncRedisSession&& other) noexcept;
         AsyncRedisSession& operator=(AsyncRedisSession&& other) noexcept;
@@ -49,7 +61,7 @@ namespace galay::redis
          * @param url Redis连接URL，格式：redis://[username:password@]host:port[/db_index]
          * @return 异步结果，成功返回void，失败返回RedisError
          */
-        AsyncResult<std::expected<void, RedisError>> connect(const std::string& url);
+        RedisVoidResult connect(const std::string& url);
 
         /**
          * @brief 连接到Redis服务器（基础版本）
@@ -59,8 +71,8 @@ namespace galay::redis
          * @param password 密码（为空则不认证）
          * @return 异步结果，成功返回void，失败返回RedisError
          */
-        AsyncResult<std::expected<void, RedisError>> connect(const std::string& ip, int32_t port,
-                                                              const std::string& username, const std::string& password);
+        RedisVoidResult connect(const std::string& ip, int32_t port,
+                                const std::string& username, const std::string& password);
 
         /**
          * @brief 连接到Redis服务器并选择数据库
@@ -71,9 +83,9 @@ namespace galay::redis
          * @param db_index 数据库索引（0-15）
          * @return 异步结果，成功返回void，失败返回RedisError
          */
-        AsyncResult<std::expected<void, RedisError>> connect(const std::string& ip, int32_t port,
-                                                              const std::string& username, const std::string& password,
-                                                              int32_t db_index);
+        RedisVoidResult connect(const std::string& ip, int32_t port,
+                                const std::string& username, const std::string& password,
+                                int32_t db_index);
 
         /**
          * @brief 连接到Redis服务器并指定协议版本
@@ -82,19 +94,19 @@ namespace galay::redis
          * @param username 用户名（Redis 6.0+ ACL，为空则不使用）
          * @param password 密码（为空则不认证）
          * @param db_index 数据库索引（0-15）
-         * @param version RESP协议版本（2或3）
+         * @param version RESP协议版本（2或3）  
          * @return 异步结果，成功返回void，失败返回RedisError
          */
-        AsyncResult<std::expected<void, RedisError>> connect(const std::string& ip, int32_t port,
-                                                              const std::string& username, const std::string& password,
-                                                              int32_t db_index, int version);
+        RedisVoidResult connect(const std::string& ip, int32_t port,
+                                const std::string& username, const std::string& password,
+                                int32_t db_index, int version);
         // 可变参数模板版本 - 避免创建临时 vector（高性能版本）
         template<typename... Args>
-        AsyncResult<std::expected<RedisValue, RedisError>> execute(const std::string& cmd, Args&&... args)
+        RedisResult execute(const std::string& cmd, Args&&... args)
         {
             // 检查会话是否已关闭
             if (m_is_closed) {
-                auto waiter = std::make_shared<AsyncWaiter<RedisValue, RedisError>>();
+                auto waiter = std::make_shared<AsyncWaiter<std::vector<RedisValue>, RedisError>>();
                 waiter->notify(std::unexpected(RedisError(ConnectionClosed, "Session is closed")));
                 return waiter->wait();
             }
@@ -117,7 +129,7 @@ namespace galay::redis
          * @param password 密码
          * @return 异步结果，成功返回 SimpleString "OK"
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> auth(const std::string& password);
+        RedisResult auth(const std::string& password);
 
         /**
          * @brief 使用用户名和密码认证（Redis 6.0+ ACL）
@@ -125,27 +137,27 @@ namespace galay::redis
          * @param password 密码
          * @return 异步结果，成功返回 SimpleString "OK"
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> auth(const std::string& username, const std::string& password);
+        RedisResult auth(const std::string& username, const std::string& password);
 
         /**
          * @brief 切换到指定的数据库
          * @param db_index 数据库索引（0-15，默认有16个数据库）
          * @return 异步结果，成功返回 SimpleString "OK"
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> select(int32_t db_index);
+        RedisResult select(int32_t db_index);
 
         /**
          * @brief 测试连接是否正常
          * @return 异步结果，返回 SimpleString "PONG"
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> ping();
+        RedisResult ping(AsyncRedisConfig config = AsyncRedisConfig::noTimeout());
 
         /**
          * @brief 回显字符串
          * @param message 要回显的消息
          * @return 异步结果，返回 BulkString 相同的消息
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> echo(const std::string& message);
+        RedisResult echo(const std::string& message);
 
         // ======================== String操作 ========================
 
@@ -154,7 +166,7 @@ namespace galay::redis
          * @param key 键名
          * @return 异步结果，键存在返回 BulkString 值，不存在返回 Null
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> get(const std::string& key);
+        RedisResult get(const std::string& key);
 
         /**
          * @brief 设置键的值
@@ -162,7 +174,7 @@ namespace galay::redis
          * @param value 要设置的值
          * @return 异步结果，成功返回 SimpleString "OK"
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> set(const std::string& key, const std::string& value);
+        RedisResult set(const std::string& key, const std::string& value);
 
         /**
          * @brief 设置键的值并指定过期时间（秒）
@@ -171,35 +183,35 @@ namespace galay::redis
          * @param value 要设置的值
          * @return 异步结果，成功返回 SimpleString "OK"
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> setex(const std::string& key, int64_t seconds, const std::string& value);
+        RedisResult setex(const std::string& key, int64_t seconds, const std::string& value);
 
         /**
          * @brief 删除一个键
          * @param key 键名
          * @return 异步结果，返回 Integer 删除的键数量（0或1）
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> del(const std::string& key);
+        RedisResult del(const std::string& key);
 
         /**
          * @brief 检查键是否存在
          * @param key 键名
          * @return 异步结果，返回 Integer 1（存在）或 0（不存在）
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> exists(const std::string& key);
+        RedisResult exists(const std::string& key);
 
         /**
          * @brief 将键的整数值增1
          * @param key 键名
          * @return 异步结果，返回 Integer 增加后的值
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> incr(const std::string& key);
+        RedisResult incr(const std::string& key);
 
         /**
          * @brief 将键的整数值减1
          * @param key 键名
          * @return 异步结果，返回 Integer 减少后的值
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> decr(const std::string& key);
+        RedisResult decr(const std::string& key);
 
         // ======================== Hash操作 ========================
 
@@ -209,7 +221,7 @@ namespace galay::redis
          * @param field 字段名
          * @return 异步结果，返回 BulkString 字段的值，不存在返回 Null
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> hget(const std::string& key, const std::string& field);
+        RedisResult hget(const std::string& key, const std::string& field);
 
         /**
          * @brief 设置哈希表中字段的值
@@ -218,7 +230,7 @@ namespace galay::redis
          * @param value 字段值
          * @return 异步结果，返回 Integer 1（新字段）或 0（更新已有字段）
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> hset(const std::string& key, const std::string& field, const std::string& value);
+        RedisResult hset(const std::string& key, const std::string& field, const std::string& value);
 
         /**
          * @brief 删除哈希表中的字段
@@ -226,14 +238,14 @@ namespace galay::redis
          * @param field 要删除的字段名
          * @return 异步结果，返回 Integer 删除的字段数量（0或1）
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> hdel(const std::string& key, const std::string& field);
+        RedisResult hdel(const std::string& key, const std::string& field);
 
         /**
          * @brief 获取哈希表中的所有字段和值
          * @param key 哈希表的键名
          * @return 异步结果，返回 Array 包含字段名和值的交替序列
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> hgetAll(const std::string& key);
+        RedisResult hgetAll(const std::string& key);
 
         // ======================== List操作 ========================
 
@@ -243,7 +255,7 @@ namespace galay::redis
          * @param value 要插入的值
          * @return 异步结果，返回 Integer 列表的长度
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> lpush(const std::string& key, const std::string& value);
+        RedisResult lpush(const std::string& key, const std::string& value);
 
         /**
          * @brief 将值插入列表尾部
@@ -251,28 +263,28 @@ namespace galay::redis
          * @param value 要插入的值
          * @return 异步结果，返回 Integer 列表的长度
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> rpush(const std::string& key, const std::string& value);
+        RedisResult rpush(const std::string& key, const std::string& value);
 
         /**
          * @brief 移除并返回列表头部的元素
          * @param key 列表的键名
          * @return 异步结果，返回 BulkString 弹出的元素，列表空时返回 Null
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> lpop(const std::string& key);
+        RedisResult lpop(const std::string& key);
 
         /**
          * @brief 移除并返回列表尾部的元素
          * @param key 列表的键名
          * @return 异步结果，返回 BulkString 弹出的元素，列表空时返回 Null
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> rpop(const std::string& key);
+        RedisResult rpop(const std::string& key);
 
         /**
          * @brief 获取列表的长度
          * @param key 列表的键名
          * @return 异步结果，返回 Integer 列表长度
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> llen(const std::string& key);
+        RedisResult llen(const std::string& key);
 
         /**
          * @brief 获取列表指定范围的元素
@@ -281,7 +293,7 @@ namespace galay::redis
          * @param stop 结束索引
          * @return 异步结果，返回 Array 包含指定范围的元素
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> lrange(const std::string& key, int64_t start, int64_t stop);
+        RedisResult lrange(const std::string& key, int64_t start, int64_t stop);
 
         // ======================== Set操作 ========================
 
@@ -291,7 +303,7 @@ namespace galay::redis
          * @param member 要添加的成员
          * @return 异步结果，返回 Integer 添加的成员数量（0表示已存在，1表示新增）
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> sadd(const std::string& key, const std::string& member);
+        RedisResult sadd(const std::string& key, const std::string& member);
 
         /**
          * @brief 从集合移除成员
@@ -299,21 +311,21 @@ namespace galay::redis
          * @param member 要移除的成员
          * @return 异步结果，返回 Integer 移除的成员数量（0或1）
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> srem(const std::string& key, const std::string& member);
+        RedisResult srem(const std::string& key, const std::string& member );
 
         /**
          * @brief 获取集合的所有成员
          * @param key 集合的键名
          * @return 异步结果，返回 Array 包含所有成员的数组
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> smembers(const std::string& key);
+        RedisResult smembers(const std::string& key);
 
         /**
          * @brief 获取集合的成员数量
          * @param key 集合的键名
          * @return 异步结果，返回 Integer 集合大小
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> scard(const std::string& key);
+        RedisResult scard(const std::string& key);
 
         // ======================== Sorted Set操作 ========================
 
@@ -324,7 +336,7 @@ namespace galay::redis
          * @param member 要添加的成员
          * @return 异步结果，返回 Integer 添加的成员数量（0表示已存在且更新了分数，1表示新增）
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> zadd(const std::string& key, double score, const std::string& member);
+        RedisResult zadd(const std::string& key, double score, const std::string& member);
 
         /**
          * @brief 从有序集合移除成员
@@ -332,7 +344,7 @@ namespace galay::redis
          * @param member 要移除的成员
          * @return 异步结果，返回 Integer 移除的成员数量（0或1）
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> zrem(const std::string& key, const std::string& member);
+        RedisResult zrem(const std::string& key, const std::string& member);
 
         /**
          * @brief 获取有序集合指定范围的成员（按分数排序）
@@ -341,7 +353,7 @@ namespace galay::redis
          * @param stop 结束索引
          * @return 异步结果，返回 Array 包含指定范围的成员数组
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> zrange(const std::string& key, int64_t start, int64_t stop);
+        RedisResult zrange(const std::string& key, int64_t start, int64_t stop);
 
         /**
          * @brief 获取有序集合中成员的分数
@@ -349,7 +361,17 @@ namespace galay::redis
          * @param member 成员名
          * @return 异步结果，返回 BulkString 成员的分数，不存在返回 Null
          */
-        AsyncResult<std::expected<RedisValue, RedisError>> zscore(const std::string& key, const std::string& member);
+        RedisResult zscore(const std::string& key, const std::string& member);
+
+
+        // ======================== Pipeline批量操作 ========================
+
+        /**
+         * @brief Pipeline批量执行多个命令
+         * @param commands 命令列表，每个命令是一个字符串vector
+         * @return 异步结果，返回对应的多个RedisValue
+         */
+        RedisResult pipeline(const std::vector<std::vector<std::string>>& commands);
 
         // 关闭连接
         AsyncResult<std::expected<void, CommonError>> close();
@@ -363,13 +385,13 @@ namespace galay::redis
         AsyncRedisSession(AsyncTcpSocket&& socket, CoSchedulerHandle handle);
 
         // 发送编码的命令
-        AsyncResult<std::expected<void, RedisError>> sendCommand(const std::string& encoded_cmd);
+        Coroutine<nil> sendCommand();
 
         // 接收并解析Redis响应
-        AsyncResult<std::expected<protocol::RedisReply, RedisError>> receiveReply();
+        Coroutine<nil> receiveReply();
 
         // 执行命令的内部实现
-        AsyncResult<std::expected<RedisValue, RedisError>> executeCommand(std::string&& encoded_cmd);
+        RedisResult executeCommand(std::string&& encoded_cmd);
 
         // 成员变量
         bool m_is_closed = false;
@@ -377,9 +399,11 @@ namespace galay::redis
         CoSchedulerHandle m_handle;
         protocol::RespEncoder m_encoder;
         protocol::RespParser m_parser;
-        std::vector<char> m_recv_buffer;
-        size_t m_buffer_pos = 0;  // 缓冲区当前位置
-        static constexpr size_t BUFFER_SIZE = 8192;
+        AsyncRedisConfig m_config;
+
+        mpsc::AsyncChannel<AsyncRedisBatchTuple> m_channel;
+        std::deque<AsyncRedisBatchPair> m_waiters;
+
         Logger::uptr m_logger = Logger::createStdoutLoggerMT("AsyncRedisLogger");
     };
 

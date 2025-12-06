@@ -4,14 +4,25 @@ namespace galay::redis
 {
     const char* msg[] = {
         "success",
-        "url part invalid error",
+        "url invalid error",
         "host invalid error",
+        "port invalid error",
+        "db index invalid error",
+        "address type invalid error",
+        "version invalid error",
         "connection error",
+        "free redis object error",
         "command error",
         "timeout error",
         "auth error",
         "invalid error",
         "unknown error",
+        "parse error",
+        "send error",
+        "recv error",
+        "buffer overflow error",
+        "network error",
+        "connection closed",
     };
 
 

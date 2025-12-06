@@ -38,6 +38,13 @@ namespace galay::redis
         return *this;
     }
 
+    // 静态工厂方法：创建错误类型的RedisValue
+    RedisValue RedisValue::fromError(const std::string& error_msg)
+    {
+        protocol::RedisReply reply(protocol::RespType::Error, error_msg);
+        return RedisValue(std::move(reply));
+    }
+
     bool RedisValue::isNull()
     {
         return m_reply.isNull();

@@ -31,8 +31,8 @@ Coroutine<nil> testAsyncRedis(CoSchedulerHandle handle) {
     // Test SET
     std::cout << "Testing SET operation..." << std::endl;
     auto set_result = co_await session.set("test_key", "test_value");
-    if (!set_result) {
-        std::cout << "Failed to SET: " << set_result.error().message() << std::endl;
+    if (!set_result || set_result->empty()) {
+        std::cout << "Failed to SET: " << (set_result ? "empty result" : set_result.error().message()) << std::endl;
         co_return nil();
     }
     std::cout << "SET operation successful" << std::endl;
@@ -40,20 +40,20 @@ Coroutine<nil> testAsyncRedis(CoSchedulerHandle handle) {
     // Test GET
     std::cout << "Testing GET operation..." << std::endl;
     auto get_result = co_await session.get("test_key");
-    if (!get_result) {
-        std::cout << "Failed to GET: " << get_result.error().message() << std::endl;
+    if (!get_result || get_result->empty()) {
+        std::cout << "Failed to GET: " << (get_result ? "empty result" : get_result.error().message()) << std::endl;
         co_return nil();
     }
-    std::cout << "GET result: " << get_result.value().toString() << std::endl;
+    std::cout << "GET result: " << get_result->front().toString() << std::endl;
 
     // Test DEL
     std::cout << "Testing DEL operation..." << std::endl;
     auto del_result = co_await session.del("test_key");
-    if (!del_result) {
-        std::cout << "Failed to DEL: " << del_result.error().message() << std::endl;
+    if (!del_result || del_result->empty()) {
+        std::cout << "Failed to DEL: " << (del_result ? "empty result" : del_result.error().message()) << std::endl;
         co_return nil();
     }
-    std::cout << "DEL operation successful, deleted " << del_result.value().toInteger() << " keys" << std::endl;
+    std::cout << "DEL operation successful, deleted " << del_result->front().toInteger() << " keys" << std::endl;
 
     // Test disconnect
     std::cout << "Closing connection..." << std::endl;
