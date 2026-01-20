@@ -2,19 +2,19 @@
 #define GALAY_REDIS_ASYNC_SESSION_H
 
 #include <cstdint>
-#include <galay/kernel/async/Socket.h>
-#include <galay/kernel/coroutine/CoSchedulerHandle.hpp>
-#include <galay/kernel/coroutine/Result.hpp>
-#include <galay/kernel/coroutine/AsyncWaiter.hpp>
-#include <galay/kernel/async/TimerGenerator.h>
-#include <galay/common/Base.h>
-#include <galay/kernel/concurrency/MpscChannel.h>
+#include <galay-kernel/async/TcpSocket.h>
+#include <galay-kernel/kernel/IOScheduler.hpp>
+#include <galay-kernel/common/Host.hpp>
+#include <galay-kernel/common/Buffer.h>
+#include <galay-kernel/common/Error.h>
 #include <memory>
 #include <string>
 #include <expected>
-#include <tuple>
-#include <utility>
+#include <optional>
 #include <vector>
+#include <coroutine>
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
 #include "galay-redis/base/RedisError.h"
 #include "galay-redis/base/RedisValue.h"
 #include "galay-redis/protocol/RedisProtocol.h"
@@ -22,30 +22,148 @@
 
 namespace galay::redis
 {
-    // 使用galay框架的类型
-    using galay::AsyncTcpSocket;
-    using galay::CoSchedulerHandle;
-    using galay::AsyncResult;
-    using galay::Coroutine;
-    using galay::nil;
-    using galay::Host;
-    using galay::Bytes;
-    using galay::error::CommonError;
+    using galay::async::TcpSocket;
+    using galay::kernel::IOScheduler;
+    using galay::kernel::Host;
+    using galay::kernel::IOError;
+    using galay::kernel::IPType;
+    using galay::kernel::RingBuffer;
+    using galay::kernel::SendAwaitable;
+    using galay::kernel::ReadvAwaitable;
 
-    template<typename T, typename E>
-    using AsyncWaiter = galay::AsyncWaiter<T, E>;
+    // 类型别名
+    using RedisResult = std::expected<std::optional<std::vector<RedisValue>>, RedisError>;
+    using RedisVoidResult = std::expected<void, RedisError>;
 
-    // 类型别名简化
-    using RedisResult = AsyncResult<std::expected<std::vector<RedisValue>, RedisError>>;
-    using RedisVoidResult = AsyncResult<std::expected<void, RedisError>>;
+    // 前向声明
+    class AsyncRedisSession;
 
-    // 异步Redis会话类 - 在同一CoSchedulerHandle下安全，非线程安全
+    /**
+     * @brief Redis命令执行等待体
+     * @details 自动处理完整的命令发送和响应接收流程
+     */
+    class ExecuteAwaitable
+    {
+    public:
+        ExecuteAwaitable(AsyncRedisSession& session,
+                        std::string cmd,
+                        std::vector<std::string> args,
+                        size_t expected_replies = 1);
+
+        bool await_ready() const noexcept { return false; }
+        bool await_suspend(std::coroutine_handle<> handle);
+        RedisResult await_resume();
+
+        bool isInvalid() const { return m_state == State::Invalid; }
+
+    private:
+        enum class State {
+            Invalid,
+            Sending,
+            Receiving
+        };
+
+        AsyncRedisSession& m_session;
+        std::string m_cmd;
+        std::vector<std::string> m_args;
+        std::string m_encoded_cmd;
+        size_t m_expected_replies;
+        std::vector<RedisValue> m_values;
+        State m_state;
+        size_t m_sent;
+
+        std::optional<SendAwaitable> m_send_awaitable;
+        std::optional<ReadvAwaitable> m_recv_awaitable;
+    };
+
+    /**
+     * @brief Redis Pipeline等待体
+     */
+    class PipelineAwaitable
+    {
+    public:
+        PipelineAwaitable(AsyncRedisSession& session,
+                         std::vector<std::vector<std::string>> commands);
+
+        bool await_ready() const noexcept { return false; }
+        bool await_suspend(std::coroutine_handle<> handle);
+        RedisResult await_resume();
+
+        bool isInvalid() const { return m_state == State::Invalid; }
+
+    private:
+        enum class State {
+            Invalid,
+            Sending,
+            Receiving
+        };
+
+        AsyncRedisSession& m_session;
+        std::vector<std::vector<std::string>> m_commands;
+        std::string m_encoded_batch;
+        std::vector<RedisValue> m_values;
+        State m_state;
+        size_t m_sent;
+
+        std::optional<SendAwaitable> m_send_awaitable;
+        std::optional<ReadvAwaitable> m_recv_awaitable;
+    };
+
+    /**
+     * @brief Redis连接等待体
+     */
+    class ConnectAwaitable
+    {
+    public:
+        ConnectAwaitable(AsyncRedisSession& session,
+                        std::string ip,
+                        int32_t port,
+                        std::string username,
+                        std::string password,
+                        int32_t db_index,
+                        int version);
+
+        bool await_ready() const noexcept { return false; }
+        bool await_suspend(std::coroutine_handle<> handle);
+        RedisVoidResult await_resume();
+
+        bool isInvalid() const { return m_state == State::Invalid; }
+
+    private:
+        enum class State {
+            Invalid,
+            Connecting,
+            Authenticating,
+            SelectingDB,
+            Done
+        };
+
+        AsyncRedisSession& m_session;
+        std::string m_ip;
+        int32_t m_port;
+        std::string m_username;
+        std::string m_password;
+        int32_t m_db_index;
+        int m_version;
+        State m_state;
+
+        // 连接相关的 awaitable
+        std::optional<SendAwaitable> m_send_awaitable;
+        std::optional<ReadvAwaitable> m_recv_awaitable;
+        std::vector<RedisValue> m_temp_values;
+        std::string m_encoded_cmd;
+        size_t m_sent;
+    };
+
+    /**
+     * @brief 异步Redis会话类 - 使用Awaitable模式
+     * @details 完全采用状态机实现，无Coroutine开销
+     */
     class AsyncRedisSession
     {
-        using AsyncRedisBatchTuple = std::tuple<std::string, int32_t, std::shared_ptr<AsyncWaiter<std::vector<RedisValue>, RedisError>>>;
-        using AsyncRedisBatchPair = std::pair<int32_t, std::shared_ptr<AsyncWaiter<std::vector<RedisValue>, RedisError>>>;
     public:
-        AsyncRedisSession(CoSchedulerHandle handle, AsyncRedisConfig config = AsyncRedisConfig::noTimeout());
+        AsyncRedisSession(IOScheduler* scheduler, AsyncRedisConfig config = AsyncRedisConfig::noTimeout());
+
         // 移动构造和赋值
         AsyncRedisSession(AsyncRedisSession&& other) noexcept;
         AsyncRedisSession& operator=(AsyncRedisSession&& other) noexcept;
@@ -56,355 +174,102 @@ namespace galay::redis
 
         // ======================== 连接方法 ========================
 
-        /**
-         * @brief 使用URL连接到Redis服务器
-         * @param url Redis连接URL，格式：redis://[username:password@]host:port[/db_index]
-         * @return 异步结果，成功返回void，失败返回RedisError
-         */
-        RedisVoidResult connect(const std::string& url);
-
-        /**
-         * @brief 连接到Redis服务器（基础版本）
-         * @param ip Redis服务器IP地址
-         * @param port Redis服务器端口
-         * @param username 用户名（Redis 6.0+ ACL，为空则不使用）
-         * @param password 密码（为空则不认证）
-         * @return 异步结果，成功返回void，失败返回RedisError
-         */
-        RedisVoidResult connect(const std::string& ip, int32_t port,
-                                const std::string& username, const std::string& password);
-
-        /**
-         * @brief 连接到Redis服务器并选择数据库
-         * @param ip Redis服务器IP地址
-         * @param port Redis服务器端口
-         * @param username 用户名（Redis 6.0+ ACL，为空则不使用）
-         * @param password 密码（为空则不认证）
-         * @param db_index 数据库索引（0-15）
-         * @return 异步结果，成功返回void，失败返回RedisError
-         */
-        RedisVoidResult connect(const std::string& ip, int32_t port,
-                                const std::string& username, const std::string& password,
-                                int32_t db_index);
-
-        /**
-         * @brief 连接到Redis服务器并指定协议版本
-         * @param ip Redis服务器IP地址
-         * @param port Redis服务器端口
-         * @param username 用户名（Redis 6.0+ ACL，为空则不使用）
-         * @param password 密码（为空则不认证）
-         * @param db_index 数据库索引（0-15）
-         * @param version RESP协议版本（2或3）  
-         * @return 异步结果，成功返回void，失败返回RedisError
-         */
-        RedisVoidResult connect(const std::string& ip, int32_t port,
-                                const std::string& username, const std::string& password,
-                                int32_t db_index, int version);
-        // 可变参数模板版本 - 避免创建临时 vector（高性能版本）
-        template<typename... Args>
-        RedisResult execute(const std::string& cmd, Args&&... args)
-        {
-            // 检查会话是否已关闭
-            if (m_is_closed) {
-                auto waiter = std::make_shared<AsyncWaiter<std::vector<RedisValue>, RedisError>>();
-                waiter->notify(std::unexpected(RedisError(ConnectionClosed, "Session is closed")));
-                return waiter->wait();
-            }
-
-            // 构建命令参数列表
-            std::vector<std::string> cmd_parts;
-            cmd_parts.reserve(1 + sizeof...(args));
-            cmd_parts.push_back(cmd);
-            (cmd_parts.push_back(std::forward<Args>(args)), ...);
-
-            // 编码并执行命令
-            auto encoded = m_encoder.encodeCommand(cmd_parts);
-            return executeCommand(std::move(encoded));
-        }
+        ConnectAwaitable& connect(const std::string& url);
+        ConnectAwaitable& connect(const std::string& ip, int32_t port,
+                                 const std::string& username = "",
+                                 const std::string& password = "");
+        ConnectAwaitable& connect(const std::string& ip, int32_t port,
+                                 const std::string& username,
+                                 const std::string& password,
+                                 int32_t db_index);
+        ConnectAwaitable& connect(const std::string& ip, int32_t port,
+                                 const std::string& username,
+                                 const std::string& password,
+                                 int32_t db_index, int version);
 
         // ======================== 基础Redis命令 ========================
 
-        /**
-         * @brief 使用密码认证（Redis 5.0之前版本）
-         * @param password 密码
-         * @return 异步结果，成功返回 SimpleString "OK"
-         */
-        RedisResult auth(const std::string& password);
-
-        /**
-         * @brief 使用用户名和密码认证（Redis 6.0+ ACL）
-         * @param username 用户名
-         * @param password 密码
-         * @return 异步结果，成功返回 SimpleString "OK"
-         */
-        RedisResult auth(const std::string& username, const std::string& password);
-
-        /**
-         * @brief 切换到指定的数据库
-         * @param db_index 数据库索引（0-15，默认有16个数据库）
-         * @return 异步结果，成功返回 SimpleString "OK"
-         */
-        RedisResult select(int32_t db_index);
-
-        /**
-         * @brief 测试连接是否正常
-         * @return 异步结果，返回 SimpleString "PONG"
-         */
-        RedisResult ping(AsyncRedisConfig config = AsyncRedisConfig::noTimeout());
-
-        /**
-         * @brief 回显字符串
-         * @param message 要回显的消息
-         * @return 异步结果，返回 BulkString 相同的消息
-         */
-        RedisResult echo(const std::string& message);
+        ExecuteAwaitable& execute(const std::string& cmd, const std::vector<std::string>& args);
+        ExecuteAwaitable& auth(const std::string& password);
+        ExecuteAwaitable& auth(const std::string& username, const std::string& password);
+        ExecuteAwaitable& select(int32_t db_index);
+        ExecuteAwaitable& ping();
+        ExecuteAwaitable& echo(const std::string& message);
 
         // ======================== String操作 ========================
 
-        /**
-         * @brief 获取键的值
-         * @param key 键名
-         * @return 异步结果，键存在返回 BulkString 值，不存在返回 Null
-         */
-        RedisResult get(const std::string& key);
-
-        /**
-         * @brief 设置键的值
-         * @param key 键名
-         * @param value 要设置的值
-         * @return 异步结果，成功返回 SimpleString "OK"
-         */
-        RedisResult set(const std::string& key, const std::string& value);
-
-        /**
-         * @brief 设置键的值并指定过期时间（秒）
-         * @param key 键名
-         * @param seconds 过期时间（秒）
-         * @param value 要设置的值
-         * @return 异步结果，成功返回 SimpleString "OK"
-         */
-        RedisResult setex(const std::string& key, int64_t seconds, const std::string& value);
-
-        /**
-         * @brief 删除一个键
-         * @param key 键名
-         * @return 异步结果，返回 Integer 删除的键数量（0或1）
-         */
-        RedisResult del(const std::string& key);
-
-        /**
-         * @brief 检查键是否存在
-         * @param key 键名
-         * @return 异步结果，返回 Integer 1（存在）或 0（不存在）
-         */
-        RedisResult exists(const std::string& key);
-
-        /**
-         * @brief 将键的整数值增1
-         * @param key 键名
-         * @return 异步结果，返回 Integer 增加后的值
-         */
-        RedisResult incr(const std::string& key);
-
-        /**
-         * @brief 将键的整数值减1
-         * @param key 键名
-         * @return 异步结果，返回 Integer 减少后的值
-         */
-        RedisResult decr(const std::string& key);
+        ExecuteAwaitable& get(const std::string& key);
+        ExecuteAwaitable& set(const std::string& key, const std::string& value);
+        ExecuteAwaitable& setex(const std::string& key, int64_t seconds, const std::string& value);
+        ExecuteAwaitable& del(const std::string& key);
+        ExecuteAwaitable& exists(const std::string& key);
+        ExecuteAwaitable& incr(const std::string& key);
+        ExecuteAwaitable& decr(const std::string& key);
 
         // ======================== Hash操作 ========================
 
-        /**
-         * @brief 获取哈希表中指定字段的值
-         * @param key 哈希表的键名
-         * @param field 字段名
-         * @return 异步结果，返回 BulkString 字段的值，不存在返回 Null
-         */
-        RedisResult hget(const std::string& key, const std::string& field);
-
-        /**
-         * @brief 设置哈希表中字段的值
-         * @param key 哈希表的键名
-         * @param field 字段名
-         * @param value 字段值
-         * @return 异步结果，返回 Integer 1（新字段）或 0（更新已有字段）
-         */
-        RedisResult hset(const std::string& key, const std::string& field, const std::string& value);
-
-        /**
-         * @brief 删除哈希表中的字段
-         * @param key 哈希表的键名
-         * @param field 要删除的字段名
-         * @return 异步结果，返回 Integer 删除的字段数量（0或1）
-         */
-        RedisResult hdel(const std::string& key, const std::string& field);
-
-        /**
-         * @brief 获取哈希表中的所有字段和值
-         * @param key 哈希表的键名
-         * @return 异步结果，返回 Array 包含字段名和值的交替序列
-         */
-        RedisResult hgetAll(const std::string& key);
+        ExecuteAwaitable& hget(const std::string& key, const std::string& field);
+        ExecuteAwaitable& hset(const std::string& key, const std::string& field, const std::string& value);
+        ExecuteAwaitable& hdel(const std::string& key, const std::string& field);
+        ExecuteAwaitable& hgetAll(const std::string& key);
 
         // ======================== List操作 ========================
 
-        /**
-         * @brief 将值插入列表头部
-         * @param key 列表的键名
-         * @param value 要插入的值
-         * @return 异步结果，返回 Integer 列表的长度
-         */
-        RedisResult lpush(const std::string& key, const std::string& value);
-
-        /**
-         * @brief 将值插入列表尾部
-         * @param key 列表的键名
-         * @param value 要插入的值
-         * @return 异步结果，返回 Integer 列表的长度
-         */
-        RedisResult rpush(const std::string& key, const std::string& value);
-
-        /**
-         * @brief 移除并返回列表头部的元素
-         * @param key 列表的键名
-         * @return 异步结果，返回 BulkString 弹出的元素，列表空时返回 Null
-         */
-        RedisResult lpop(const std::string& key);
-
-        /**
-         * @brief 移除并返回列表尾部的元素
-         * @param key 列表的键名
-         * @return 异步结果，返回 BulkString 弹出的元素，列表空时返回 Null
-         */
-        RedisResult rpop(const std::string& key);
-
-        /**
-         * @brief 获取列表的长度
-         * @param key 列表的键名
-         * @return 异步结果，返回 Integer 列表长度
-         */
-        RedisResult llen(const std::string& key);
-
-        /**
-         * @brief 获取列表指定范围的元素
-         * @param key 列表的键名
-         * @param start 开始索引（0表示第一个元素，-1表示最后一个元素）
-         * @param stop 结束索引
-         * @return 异步结果，返回 Array 包含指定范围的元素
-         */
-        RedisResult lrange(const std::string& key, int64_t start, int64_t stop);
+        ExecuteAwaitable& lpush(const std::string& key, const std::string& value);
+        ExecuteAwaitable& rpush(const std::string& key, const std::string& value);
+        ExecuteAwaitable& lpop(const std::string& key);
+        ExecuteAwaitable& rpop(const std::string& key);
+        ExecuteAwaitable& llen(const std::string& key);
+        ExecuteAwaitable& lrange(const std::string& key, int64_t start, int64_t stop);
 
         // ======================== Set操作 ========================
 
-        /**
-         * @brief 向集合添加成员
-         * @param key 集合的键名
-         * @param member 要添加的成员
-         * @return 异步结果，返回 Integer 添加的成员数量（0表示已存在，1表示新增）
-         */
-        RedisResult sadd(const std::string& key, const std::string& member);
-
-        /**
-         * @brief 从集合移除成员
-         * @param key 集合的键名
-         * @param member 要移除的成员
-         * @return 异步结果，返回 Integer 移除的成员数量（0或1）
-         */
-        RedisResult srem(const std::string& key, const std::string& member );
-
-        /**
-         * @brief 获取集合的所有成员
-         * @param key 集合的键名
-         * @return 异步结果，返回 Array 包含所有成员的数组
-         */
-        RedisResult smembers(const std::string& key);
-
-        /**
-         * @brief 获取集合的成员数量
-         * @param key 集合的键名
-         * @return 异步结果，返回 Integer 集合大小
-         */
-        RedisResult scard(const std::string& key);
+        ExecuteAwaitable& sadd(const std::string& key, const std::string& member);
+        ExecuteAwaitable& srem(const std::string& key, const std::string& member);
+        ExecuteAwaitable& smembers(const std::string& key);
+        ExecuteAwaitable& scard(const std::string& key);
 
         // ======================== Sorted Set操作 ========================
 
-        /**
-         * @brief 向有序集合添加成员
-         * @param key 有序集合的键名
-         * @param score 成员的分数
-         * @param member 要添加的成员
-         * @return 异步结果，返回 Integer 添加的成员数量（0表示已存在且更新了分数，1表示新增）
-         */
-        RedisResult zadd(const std::string& key, double score, const std::string& member);
-
-        /**
-         * @brief 从有序集合移除成员
-         * @param key 有序集合的键名
-         * @param member 要移除的成员
-         * @return 异步结果，返回 Integer 移除的成员数量（0或1）
-         */
-        RedisResult zrem(const std::string& key, const std::string& member);
-
-        /**
-         * @brief 获取有序集合指定范围的成员（按分数排序）
-         * @param key 有序集合的键名
-         * @param start 开始索引
-         * @param stop 结束索引
-         * @return 异步结果，返回 Array 包含指定范围的成员数组
-         */
-        RedisResult zrange(const std::string& key, int64_t start, int64_t stop);
-
-        /**
-         * @brief 获取有序集合中成员的分数
-         * @param key 有序集合的键名
-         * @param member 成员名
-         * @return 异步结果，返回 BulkString 成员的分数，不存在返回 Null
-         */
-        RedisResult zscore(const std::string& key, const std::string& member);
-
+        ExecuteAwaitable& zadd(const std::string& key, double score, const std::string& member);
+        ExecuteAwaitable& zrem(const std::string& key, const std::string& member);
+        ExecuteAwaitable& zrange(const std::string& key, int64_t start, int64_t stop);
+        ExecuteAwaitable& zscore(const std::string& key, const std::string& member);
 
         // ======================== Pipeline批量操作 ========================
 
-        /**
-         * @brief Pipeline批量执行多个命令
-         * @param commands 命令列表，每个命令是一个字符串vector
-         * @return 异步结果，返回对应的多个RedisValue
-         */
-        RedisResult pipeline(const std::vector<std::vector<std::string>>& commands);
+        PipelineAwaitable& pipeline(const std::vector<std::vector<std::string>>& commands);
 
-        // 关闭连接
-        AsyncResult<std::expected<void, CommonError>> close();
-        bool isClosed() const;
-        void markClosed();
+        // ======================== 连接管理 ========================
+
+        auto close() {
+            return m_socket.close();
+        }
+
+        bool isClosed() const { return m_is_closed; }
 
         ~AsyncRedisSession() = default;
 
     private:
-        // 私有构造函数 - 仅供工厂方法使用
-        AsyncRedisSession(AsyncTcpSocket&& socket, CoSchedulerHandle handle);
-
-        // 发送编码的命令
-        Coroutine<nil> sendCommand();
-
-        // 接收并解析Redis响应
-        Coroutine<nil> receiveReply();
-
-        // 执行命令的内部实现
-        RedisResult executeCommand(std::string&& encoded_cmd);
+        friend class ExecuteAwaitable;
+        friend class PipelineAwaitable;
+        friend class ConnectAwaitable;
 
         // 成员变量
         bool m_is_closed = false;
-        AsyncTcpSocket m_socket;
-        CoSchedulerHandle m_handle;
+        TcpSocket m_socket;
+        IOScheduler* m_scheduler;
         protocol::RespEncoder m_encoder;
         protocol::RespParser m_parser;
         AsyncRedisConfig m_config;
+        RingBuffer m_ring_buffer;
 
-        mpsc::AsyncChannel<AsyncRedisBatchTuple> m_channel;
-        std::deque<AsyncRedisBatchPair> m_waiters;
+        // 存储 awaitable 对象
+        std::optional<ExecuteAwaitable> m_execute_awaitable;
+        std::optional<PipelineAwaitable> m_pipeline_awaitable;
+        std::optional<ConnectAwaitable> m_connect_awaitable;
 
-        Logger::uptr m_logger = Logger::createStdoutLoggerMT("AsyncRedisLogger");
+        std::shared_ptr<spdlog::logger> m_logger;
     };
 
 }

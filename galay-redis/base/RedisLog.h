@@ -2,7 +2,7 @@
 #define GALAY_REDIS_LOG_H
 
 
-#include <galay/common/Log.h>
+#include <spdlog/spdlog.h>
 
 namespace galay::redis
 {

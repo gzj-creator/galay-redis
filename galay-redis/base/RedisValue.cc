@@ -45,184 +45,187 @@ namespace galay::redis
         return RedisValue(std::move(reply));
     }
 
-    bool RedisValue::isNull()
+    bool RedisValue::isNull() const
     {
         return m_reply.isNull();
     }
 
-    bool RedisValue::isStatus()
+    bool RedisValue::isStatus() const
     {
         return m_reply.isSimpleString();
     }
 
-    std::string RedisValue::toStatus()
+    std::string RedisValue::toStatus() const
     {
         return m_reply.asString();
     }
 
-    bool RedisValue::isError()
+    bool RedisValue::isError() const
     {
         return m_reply.isError();
     }
 
-    std::string RedisValue::toError()
+    std::string RedisValue::toError() const
     {
         return m_reply.asString();
     }
 
-    bool RedisValue::isInteger()
+    bool RedisValue::isInteger() const
     {
         return m_reply.isInteger();
     }
 
-    int64_t RedisValue::toInteger()
+    int64_t RedisValue::toInteger() const
     {
         return m_reply.asInteger();
     }
 
-    bool RedisValue::isString()
+    bool RedisValue::isString() const
     {
         return m_reply.isBulkString();
     }
 
-    std::string RedisValue::toString()
+    std::string RedisValue::toString() const
     {
         return m_reply.asString();
     }
 
-    bool RedisValue::isArray()
+    bool RedisValue::isArray() const
     {
         return m_reply.isArray();
     }
 
-    std::vector<RedisValue> RedisValue::toArray()
+    std::vector<RedisValue> RedisValue::toArray() const
     {
         if (!m_array_cached) {
             m_cached_array.clear();
             if (m_reply.isArray()) {
                 const auto& arr = m_reply.asArray();
                 m_cached_array.reserve(arr.size());
-                for (auto& elem : arr) {
-                    // 使用const_cast来绕过const限制，因为我们需要移动
-                    m_cached_array.push_back(RedisValue(protocol::RedisReply(const_cast<protocol::RedisReply&>(elem))));
+                for (const auto& elem : arr) {
+                    // 使用拷贝构造，避免 const_cast
+                    m_cached_array.push_back(RedisValue(elem));
                 }
             }
             m_array_cached = true;
         }
-        // 返回移动的副本，避免拷贝问题
+        // 返回拷贝，保持接口不变
         std::vector<RedisValue> result;
         result.reserve(m_cached_array.size());
-        for (auto& elem : m_cached_array) {
-            result.push_back(RedisValue(protocol::RedisReply(elem.m_reply)));
+        for (const auto& elem : m_cached_array) {
+            result.push_back(RedisValue(elem.m_reply));
         }
         return result;
     }
 
-    bool RedisValue::isDouble()
+    bool RedisValue::isDouble() const
     {
         return m_reply.isDouble();
     }
 
-    double RedisValue::toDouble()
+    double RedisValue::toDouble() const
     {
         return m_reply.asDouble();
     }
 
-    bool RedisValue::isBool()
+    bool RedisValue::isBool() const
     {
         return m_reply.isBoolean();
     }
 
-    bool RedisValue::toBool()
+    bool RedisValue::toBool() const
     {
         return m_reply.asBoolean();
     }
 
-    bool RedisValue::isMap()
+    bool RedisValue::isMap() const
     {
         return m_reply.isMap();
     }
 
-    std::map<std::string, RedisValue> RedisValue::toMap()
+    std::map<std::string, RedisValue> RedisValue::toMap() const
     {
         if (!m_map_cached) {
             m_cached_map.clear();
             if (m_reply.isMap()) {
                 const auto& map_data = m_reply.asMap();
-                for (auto& [key, value] : map_data) {
+                for (const auto& [key, value] : map_data) {
+                    // 使用拷贝构造，避免 const_cast
                     m_cached_map.emplace(
                         key.asString(),
-                        RedisValue(protocol::RedisReply(const_cast<protocol::RedisReply&>(value)))
+                        RedisValue(value)
                     );
                 }
             }
             m_map_cached = true;
         }
-        // 返回移动的副本，避免拷贝问题
+        // 返回拷贝，保持接口不变
         std::map<std::string, RedisValue> result;
-        for (auto& [key, value] : m_cached_map) {
-            result.emplace(key, RedisValue(protocol::RedisReply(value.m_reply)));
+        for (const auto& [key, value] : m_cached_map) {
+            result.emplace(key, RedisValue(value.m_reply));
         }
         return result;
     }
 
-    bool RedisValue::isSet()
+    bool RedisValue::isSet() const
     {
         return m_reply.isSet();
     }
 
-    std::vector<RedisValue> RedisValue::toSet()
+    std::vector<RedisValue> RedisValue::toSet() const
     {
         std::vector<RedisValue> result;
         if (m_reply.isSet()) {
             const auto& set_data = m_reply.asArray();  // Set uses array internally
             result.reserve(set_data.size());
-            for (auto& elem : set_data) {
-                result.push_back(RedisValue(protocol::RedisReply(const_cast<protocol::RedisReply&>(elem))));
+            for (const auto& elem : set_data) {
+                // 使用拷贝构造，避免 const_cast
+                result.push_back(RedisValue(elem));
             }
         }
         return result;
     }
 
-    bool RedisValue::isAttr()
+    bool RedisValue::isAttr() const
     {
         return false;  // 暂未实现
     }
 
-    bool RedisValue::isPush()
+    bool RedisValue::isPush() const
     {
         return m_reply.isPush();
     }
 
-    std::vector<RedisValue> RedisValue::toPush()
+    std::vector<RedisValue> RedisValue::toPush() const
     {
         std::vector<RedisValue> result;
         if (m_reply.isPush()) {
             const auto& push_data = m_reply.asArray();
             result.reserve(push_data.size());
-            for (auto& elem : push_data) {
-                result.push_back(RedisValue(protocol::RedisReply(const_cast<protocol::RedisReply&>(elem))));
+            for (const auto& elem : push_data) {
+                // 使用拷贝构造，避免 const_cast
+                result.push_back(RedisValue(elem));
             }
         }
         return result;
     }
 
-    bool RedisValue::isBigNumber()
+    bool RedisValue::isBigNumber() const
     {
         return false;  // 暂未实现
     }
 
-    std::string RedisValue::toBigNumber()
+    std::string RedisValue::toBigNumber() const
     {
         return "";  // 暂未实现
     }
 
-    bool RedisValue::isVerb()
+    bool RedisValue::isVerb() const
     {
         return false;  // 暂未实现
     }
 
-    std::string RedisValue::toVerb()
+    std::string RedisValue::toVerb() const
     {
         return "";  // 暂未实现
     }

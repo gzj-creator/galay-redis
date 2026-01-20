@@ -5,13 +5,14 @@ file(GLOB SRC_LIST *.cc)
 set(OPENSSL_ROOT_DIR "/opt/homebrew")
 set(ENV{OPENSSL_ROOT_DIR} "/opt/homebrew")
 
-find_package(Galay REQUIRED)
+find_package(galay-kernel REQUIRED)
+find_package(galay-utils REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 # 确保包含目录正确设置
 include_directories(${OPENSSL_INCLUDE_DIR})
-include_directories(${CMAKE_SOURCE_DIR}/galay-http)
-# 添加/usr/local/include以确保Galay库能访问其头文件
+include_directories(${CMAKE_SOURCE_DIR}/galay-redis)
+# 添加/usr/local/include以确保galay-kernel库能访问其头文件
 include_directories(/usr/local/include)
 
 foreach(SRC ${SRC_LIST})

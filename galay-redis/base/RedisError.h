@@ -28,6 +28,7 @@ namespace galay::redis
         REDIS_ERROR_TYPE_BUFFER_OVERFLOW_ERROR,     //缓冲区溢出
         REDIS_ERROR_TYPE_NETWORK_ERROR,             //网络错误
         REDIS_ERROR_TYPE_CONNECTION_CLOSED,         //连接已关闭
+        REDIS_ERROR_TYPE_INTERNAL_ERROR,            //内部错误
     };
 
     // 为了兼容性，提供别名

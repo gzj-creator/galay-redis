@@ -23,40 +23,40 @@ namespace galay::redis
         static RedisValue fromError(const std::string& error_msg);
 
         // RESP2
-        bool isNull();
-        bool isStatus();
-        std::string toStatus();
-        bool isError();
-        std::string toError();
-        bool isInteger();
-        int64_t toInteger();
-        bool isString();
-        std::string toString();
-        bool isArray();
+        bool isNull() const;
+        bool isStatus() const;
+        std::string toStatus() const;
+        bool isError() const;
+        std::string toError() const;
+        bool isInteger() const;
+        int64_t toInteger() const;
+        bool isString() const;
+        std::string toString() const;
+        bool isArray() const;
 
         //vector的生命周期需要小于等于RedisValue的生命周期
-        std::vector<RedisValue> toArray();
+        std::vector<RedisValue> toArray() const;
 
         //Resp3
-        bool isDouble();
-        double toDouble();
-        bool isBool();
-        bool toBool();
-        bool isMap();
+        bool isDouble() const;
+        double toDouble() const;
+        bool isBool() const;
+        bool toBool() const;
+        bool isMap() const;
         //map的生命周期需要小于等于RedisValue的生命周期
-        std::map<std::string, RedisValue> toMap();
-        bool isSet();
+        std::map<std::string, RedisValue> toMap() const;
+        bool isSet() const;
         //set的生命周期需要小于等于RedisValue的生命周期
-        std::vector<RedisValue> toSet();
-        bool isAttr();
-        bool isPush();
+        std::vector<RedisValue> toSet() const;
+        bool isAttr() const;
+        bool isPush() const;
         //push的生命周期需要小于等于RedisValue的生命周期
-        std::vector<RedisValue> toPush();
-        bool isBigNumber();
-        std::string toBigNumber();
+        std::vector<RedisValue> toPush() const;
+        bool isBigNumber() const;
+        std::string toBigNumber() const;
         //不转义字符串
-        bool isVerb();
-        std::string toVerb();
+        bool isVerb() const;
+        std::string toVerb() const;
 
         // 获取底层RedisReply
         const protocol::RedisReply& getReply() const { return m_reply; }

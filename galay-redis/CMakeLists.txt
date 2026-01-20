@@ -1,19 +1,26 @@
-find_package(Galay REQUIRED)
+find_package(galay-kernel REQUIRED)
+find_package(galay-utils REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(spdlog REQUIRED)
 
 include_directories(${OPENSSL_INCLUDE_DIR})
 
-file(GLOB SOURCES "base/*.cc" "async/*.cc" "sync/*.cc" "protocol/*.cc")
+file(GLOB SOURCES "base/*.cc" "async/*.cc" "protocol/*.cc")
 
-if(NOT TARGET Galay::galay)
-    message(FATAL_ERROR "Galay::Galay target not found. Please check Galay installation and CMake config.")
+if(NOT TARGET galay-kernel::galay-kernel)
+    message(FATAL_ERROR "galay-kernel::galay-kernel target not found. Please check galay-kernel installation and CMake config.")
+endif()
+
+if(NOT TARGET galay::galay-utils)
+    message(FATAL_ERROR "galay::galay-utils target not found. Please check galay-utils installation and CMake config.")
 endif()
 
 add_library(${PROJECT_NAME} SHARED ${SOURCES})
 
-# 链接 Galay 库
+# 链接 galay-kernel 和 galay-utils 库
 target_link_libraries(${PROJECT_NAME}
-    PUBLIC Galay::galay
+    PUBLIC galay-kernel::galay-kernel
+    PUBLIC galay::galay-utils
     PUBLIC OpenSSL::SSL    # 使用OpenSSL目标
     PUBLIC OpenSSL::Crypto # 使用OpenSSL目标
     PUBLIC pthread
