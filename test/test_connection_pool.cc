@@ -1,10 +1,13 @@
 #include "galay-redis/async/RedisConnectionPool.h"
 #include <galay-kernel/kernel/Runtime.h>
+#include <galay-kernel/concurrency/AsyncWaiter.h>
+#include <atomic>
 #include <iostream>
 #include <iomanip>
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <future>
 
 using namespace galay::redis;
 using namespace galay::kernel;
@@ -27,7 +30,7 @@ Coroutine testBasicConnectionPool(IOScheduler* scheduler)
 
     // 初始化连接池
     std::cout << "1. Initializing connection pool..." << std::endl;
-    auto init_result = co_await pool.initialize();
+    auto init_result = co_await pool.initialize().timeout(std::chrono::seconds(5));
     if (!init_result) {
         std::cerr << "   [FAILED] Failed to initialize pool: " << init_result.error().message() << std::endl;
         co_return;
@@ -41,7 +44,7 @@ Coroutine testBasicConnectionPool(IOScheduler* scheduler)
 
     // 测试获取连接
     std::cout << "\n2. Testing acquire connection..." << std::endl;
-    auto conn_result = co_await pool.acquire();
+    auto conn_result = co_await pool.acquire().timeout(std::chrono::seconds(5));
     if (!conn_result) {
         std::cerr << "   [FAILED] Failed to acquire connection: " << conn_result.error().message() << std::endl;
         pool.shutdown();
@@ -53,13 +56,14 @@ Coroutine testBasicConnectionPool(IOScheduler* scheduler)
     // 使用连接执行命令
     std::cout << "\n3. Testing command execution..." << std::endl;
     auto redis_client = conn->get();
-    auto connect_result = co_await redis_client->connect("127.0.0.1", 6379);
+    auto connect_result = co_await redis_client->connect("127.0.0.1", 6379).timeout(std::chrono::seconds(5));
     if (!connect_result) {
         std::cerr << "   [FAILED] Connection bootstrap failed: " << connect_result.error().message() << std::endl;
         pool.release(conn);
         pool.shutdown();
         co_return;
     }
+    std::cout << "   [PASSED] Connection bootstrap succeeded" << std::endl;
 
     auto ping_result = co_await redis_client->ping();
     if (ping_result && ping_result.value()) {
@@ -146,12 +150,19 @@ Coroutine testScopedConnection(IOScheduler* scheduler)
 /**
  * @brief 测试并发获取连接
  */
-Coroutine testConcurrentAcquire(IOScheduler* scheduler, int client_id, RedisConnectionPool& pool)
+Coroutine testConcurrentAcquire(IOScheduler* scheduler,
+                                int client_id,
+                                RedisConnectionPool& pool,
+                                std::shared_ptr<std::atomic<int>> failure_count,
+                                std::shared_ptr<std::atomic<int>> remaining,
+                                std::shared_ptr<AsyncWaiter<void>> done_waiter)
 {
+    (void)scheduler;
     for (int i = 0; i < 5; ++i) {
         auto conn_result = co_await pool.acquire();
         if (!conn_result) {
             std::cerr << "   Client " << client_id << " failed to acquire connection" << std::endl;
+            ++(*failure_count);
             continue;
         }
 
@@ -169,6 +180,10 @@ Coroutine testConcurrentAcquire(IOScheduler* scheduler, int client_id, RedisConn
 
         pool.release(conn);
         std::cout << "   Client " << client_id << " released connection (iteration " << i << ")" << std::endl;
+    }
+
+    if (remaining->fetch_sub(1) == 1) {
+        done_waiter->notify();
     }
 }
 
@@ -189,14 +204,21 @@ Coroutine testConcurrency(IOScheduler* scheduler)
 
     std::cout << "1. Starting 3 concurrent clients..." << std::endl;
 
+    constexpr int kConcurrentClients = 3;
+    auto failure_count = std::make_shared<std::atomic<int>>(0);
+    auto remaining = std::make_shared<std::atomic<int>>(kConcurrentClients);
+    auto done_waiter = std::make_shared<AsyncWaiter<void>>();
+
     // 启动多个并发客户端
-    for (int i = 0; i < 3; ++i) {
-        scheduler->spawn(testConcurrentAcquire(scheduler, i, pool));
+    for (int i = 0; i < kConcurrentClients; ++i) {
+        scheduler->spawn(testConcurrentAcquire(scheduler, i, pool, failure_count, remaining, done_waiter));
     }
 
-    // 等待一段时间让任务完成（使用简单的循环代替 sleep）
-    for (int i = 0; i < 100000; ++i) {
-        // 简单的延迟
+    auto all_done = co_await done_waiter->wait().timeout(std::chrono::seconds(10));
+    if (!all_done) {
+        std::cerr << "   [FAILED] Concurrent workers timeout: " << all_done.error().message() << std::endl;
+        pool.shutdown();
+        co_return;
     }
 
     auto stats = pool.getStats();
@@ -207,7 +229,12 @@ Coroutine testConcurrency(IOScheduler* scheduler)
     std::cout << "   Total acquired: " << stats.total_acquired << std::endl;
     std::cout << "   Total released: " << stats.total_released << std::endl;
     std::cout << "   Total created: " << stats.total_created << std::endl;
-    std::cout << "   [PASSED] Concurrency test complete" << std::endl;
+    if (failure_count->load() == 0) {
+        std::cout << "   [PASSED] Concurrency test complete" << std::endl;
+    } else {
+        std::cout << "   [FAILED] Concurrency test had acquire failures: "
+                  << failure_count->load() << std::endl;
+    }
 
     pool.shutdown();
 
@@ -384,6 +411,35 @@ Coroutine testStatistics(IOScheduler* scheduler)
     std::cout << "========================================\n" << std::endl;
 }
 
+Coroutine runAllConnectionPoolTests(IOScheduler* scheduler, std::promise<void>* all_done)
+{
+    auto t1 = testBasicConnectionPool(scheduler);
+    co_await spawn(t1);
+    co_await t1.wait();
+
+    auto t2 = testScopedConnection(scheduler);
+    co_await spawn(t2);
+    co_await t2.wait();
+
+    auto t3 = testConcurrency(scheduler);
+    co_await spawn(t3);
+    co_await t3.wait();
+
+    auto t4 = testPoolExpansion(scheduler);
+    co_await spawn(t4);
+    co_await t4.wait();
+
+    auto t5 = testHealthCheck(scheduler);
+    co_await spawn(t5);
+    co_await t5.wait();
+
+    auto t6 = testStatistics(scheduler);
+    co_await spawn(t6);
+    co_await t6.wait();
+
+    all_done->set_value();
+}
+
 int main()
 {
     std::cout << "\n##################################################" << std::endl;
@@ -400,24 +456,17 @@ int main()
             return 1;
         }
 
-        // 运行所有测试
-        scheduler->spawn(testBasicConnectionPool(scheduler));
-        std::this_thread::sleep_for(std::chrono::seconds(3));
+        std::promise<void> all_done_promise;
+        auto all_done_future = all_done_promise.get_future();
 
-        scheduler->spawn(testScopedConnection(scheduler));
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-
-        scheduler->spawn(testConcurrency(scheduler));
-        std::this_thread::sleep_for(std::chrono::seconds(5));
-
-        scheduler->spawn(testPoolExpansion(scheduler));
-        std::this_thread::sleep_for(std::chrono::seconds(3));
-
-        scheduler->spawn(testHealthCheck(scheduler));
-        std::this_thread::sleep_for(std::chrono::seconds(7));
-
-        scheduler->spawn(testStatistics(scheduler));
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        scheduler->spawn(runAllConnectionPoolTests(scheduler, &all_done_promise));
+        auto wait_status = all_done_future.wait_for(std::chrono::seconds(90));
+        if (wait_status != std::future_status::ready) {
+            std::cerr << "Connection pool tests timed out" << std::endl;
+            runtime.stop();
+            return 1;
+        }
+        all_done_future.get();
 
         runtime.stop();
 

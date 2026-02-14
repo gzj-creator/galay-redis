@@ -7,21 +7,22 @@ namespace galay::redis
     // ======================== PoolInitializeAwaitable 实现 ========================
 
     PoolInitializeAwaitable::PoolInitializeAwaitable(RedisConnectionPool& pool)
-        : m_pool(pool)
+        : m_pool(&pool)
+        , m_result(RedisVoidResult{})
     {
     }
 
     bool PoolInitializeAwaitable::await_suspend(std::coroutine_handle<> handle)
     {
         // 创建初始连接（同步方式）
-        while (m_created_count < m_pool.m_config.initial_connections) {
-            auto result = m_pool.getConnectionSync();
+        while (m_created_count < m_pool->m_config.initial_connections) {
+            auto result = m_pool->getConnectionSync();
             if (result) {
                 m_created_count++;
             } else {
                 // 创建失败，停止
-                RedisLogError(m_pool.m_logger, "Failed to create connection {}/{}: {}",
-                             m_created_count + 1, m_pool.m_config.initial_connections,
+                RedisLogError(m_pool->m_logger, "Failed to create connection {}/{}: {}",
+                             m_created_count + 1, m_pool->m_config.initial_connections,
                              result.error().message());
                 break;
             }
@@ -33,100 +34,111 @@ namespace galay::redis
 
     RedisVoidResult PoolInitializeAwaitable::await_resume()
     {
-        if (m_created_count < m_pool.m_config.min_connections) {
+        if (!m_result.has_value()) {
+            return std::unexpected(
+                RedisError(RedisErrorType::REDIS_ERROR_TYPE_TIMEOUT_ERROR, m_result.error().message()));
+        }
+
+        if (m_created_count < m_pool->m_config.min_connections) {
             return std::unexpected(RedisError(
                 RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
                 "Failed to create minimum connections"
             ));
         }
 
-        m_pool.m_is_initialized = true;
-        RedisLogInfo(m_pool.m_logger, "Connection pool initialized with {} connections", m_created_count);
+        m_pool->m_is_initialized = true;
+        RedisLogInfo(m_pool->m_logger, "Connection pool initialized with {} connections", m_created_count);
         return {};
     }
 
     // ======================== PoolAcquireAwaitable 实现 ========================
 
     PoolAcquireAwaitable::PoolAcquireAwaitable(RedisConnectionPool& pool)
-        : m_pool(pool)
+        : m_pool(&pool)
         , m_start_time(std::chrono::steady_clock::now())
+        , m_result(std::expected<std::shared_ptr<PooledConnection>, RedisError>{})
     {
     }
 
     bool PoolAcquireAwaitable::await_suspend(std::coroutine_handle<> handle)
     {
-        if (!m_pool.m_is_initialized) {
+        if (!m_pool->m_is_initialized) {
             return false;  // 立即恢复，返回错误
         }
 
-        if (m_pool.m_is_shutting_down) {
+        if (m_pool->m_is_shutting_down) {
             return false;  // 立即恢复，返回错误
         }
 
-        m_pool.m_waiting_requests++;
+        m_pool->m_waiting_requests++;
 
-        std::lock_guard<std::mutex> lock(m_pool.m_mutex);
+        std::lock_guard<std::mutex> lock(m_pool->m_mutex);
 
         // 尝试从可用连接中获取
-        while (!m_pool.m_available_connections.empty()) {
-            m_conn = m_pool.m_available_connections.front();
-            m_pool.m_available_connections.pop();
+        while (!m_pool->m_available_connections.empty()) {
+            m_conn = m_pool->m_available_connections.front();
+            m_pool->m_available_connections.pop();
 
             // 检查连接是否健康
             if (!m_conn->isClosed() && m_conn->isHealthy()) {
                 m_conn->updateLastUsed();
-                m_pool.m_total_acquired++;
-                m_pool.m_waiting_requests--;
+                m_pool->m_total_acquired++;
+                m_pool->m_waiting_requests--;
                 return false;  // 立即恢复
             } else {
                 // 连接不健康，销毁并继续
-                auto it = std::find(m_pool.m_all_connections.begin(),
-                                   m_pool.m_all_connections.end(), m_conn);
-                if (it != m_pool.m_all_connections.end()) {
-                    m_pool.m_all_connections.erase(it);
+                auto it = std::find(m_pool->m_all_connections.begin(),
+                                   m_pool->m_all_connections.end(), m_conn);
+                if (it != m_pool->m_all_connections.end()) {
+                    m_pool->m_all_connections.erase(it);
                 }
-                m_pool.m_total_destroyed++;
+                m_pool->m_total_destroyed++;
                 m_conn = nullptr;
             }
         }
 
         // 如果还可以创建新连接
-        if (m_pool.m_all_connections.size() < m_pool.m_config.max_connections) {
+        if (m_pool->m_all_connections.size() < m_pool->m_config.max_connections) {
             // 释放锁后创建连接
-            m_pool.m_mutex.unlock();
-            auto result = m_pool.getConnectionSync();
-            m_pool.m_mutex.lock();
+            m_pool->m_mutex.unlock();
+            auto result = m_pool->getConnectionSync();
+            m_pool->m_mutex.lock();
 
             if (result) {
                 m_conn = result.value();
                 m_conn->updateLastUsed();
-                m_pool.m_total_acquired++;
-                m_pool.m_waiting_requests--;
+                m_pool->m_total_acquired++;
+                m_pool->m_waiting_requests--;
 
-                RedisLogDebug(m_pool.m_logger, "Created and acquired new connection, total: {}",
-                             m_pool.m_all_connections.size());
+                RedisLogDebug(m_pool->m_logger, "Created and acquired new connection, total: {}",
+                             m_pool->m_all_connections.size());
                 return false;  // 立即恢复
             } else {
-                RedisLogWarn(m_pool.m_logger, "Failed to create new connection: {}",
+                RedisLogWarn(m_pool->m_logger, "Failed to create new connection: {}",
                             result.error().message());
             }
         }
 
-        m_pool.m_waiting_requests--;
+        m_pool->m_waiting_requests--;
         return false;  // 立即恢复，返回错误
     }
 
     std::expected<std::shared_ptr<PooledConnection>, RedisError>
     PoolAcquireAwaitable::await_resume()
     {
-        if (!m_pool.m_is_initialized) {
+        if (!m_result.has_value()) {
+            return std::unexpected(
+                RedisError(RedisErrorType::REDIS_ERROR_TYPE_TIMEOUT_ERROR, m_result.error().message()));
+        }
+
+        if (!m_pool->m_is_initialized) {
             return std::unexpected(RedisError(
                 RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
                 "Connection pool not initialized"
             ));
         }
 
-        if (m_pool.m_is_shutting_down) {
+        if (m_pool->m_is_shutting_down) {
             return std::unexpected(RedisError(
                 RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
                 "Connection pool is shutting down"
@@ -143,20 +155,20 @@ namespace galay::redis
         // 更新性能指标
         auto elapsed = std::chrono::steady_clock::now() - m_start_time;
         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-        m_pool.m_total_acquire_time_ms += elapsed_ms;
+        m_pool->m_total_acquire_time_ms += elapsed_ms;
 
-        double current_max = m_pool.m_max_acquire_time_ms.load();
+        double current_max = m_pool->m_max_acquire_time_ms.load();
         while (elapsed_ms > current_max) {
-            if (m_pool.m_max_acquire_time_ms.compare_exchange_weak(current_max, elapsed_ms)) {
+            if (m_pool->m_max_acquire_time_ms.compare_exchange_weak(current_max, elapsed_ms)) {
                 break;
             }
         }
 
         // 更新峰值活跃连接数
-        size_t active = m_pool.m_all_connections.size() - m_pool.m_available_connections.size();
-        size_t current_peak = m_pool.m_peak_active_connections.load();
+        size_t active = m_pool->m_all_connections.size() - m_pool->m_available_connections.size();
+        size_t current_peak = m_pool->m_peak_active_connections.load();
         while (active > current_peak) {
-            if (m_pool.m_peak_active_connections.compare_exchange_weak(current_peak, active)) {
+            if (m_pool->m_peak_active_connections.compare_exchange_weak(current_peak, active)) {
                 break;
             }
         }

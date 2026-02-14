@@ -283,7 +283,7 @@ config.connect_timeout = std::chrono::seconds(3);    // 连接超时
 ### 3. 错误处理
 
 ```cpp
-auto conn_result = co_await pool.acquire();
+auto conn_result = co_await pool.acquire().timeout(std::chrono::seconds(2));
 if (!conn_result) {
     auto& error = conn_result.error();
 
@@ -303,6 +303,22 @@ if (!conn_result) {
             break;
     }
 
+    co_return;
+}
+```
+
+### 3.1 Awaitable 超时用法
+
+```cpp
+auto init_result = co_await pool.initialize().timeout(std::chrono::seconds(5));
+if (!init_result) {
+    std::cerr << "init timeout/error: " << init_result.error().message() << std::endl;
+    co_return;
+}
+
+auto conn_result = co_await pool.acquire().timeout(std::chrono::seconds(2));
+if (!conn_result) {
+    std::cerr << "acquire timeout/error: " << conn_result.error().message() << std::endl;
     co_return;
 }
 ```

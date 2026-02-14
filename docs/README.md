@@ -201,7 +201,7 @@
 | 内存开销 | 228 字节 | 220 字节 | +3.6% |
 | CPU开销 | 100.1% | 100% | +0.1% |
 | QPS(本地) | 13,900 | 14,000 | -0.7% |
-| 超时支持 | ✅ | ❌ | ✅ |
+| 超时支持 | ✅ | ✅ | 都支持 Awaitable `.timeout()` |
 
 **结论**: 性能几乎无损失，功能显著增强
 
@@ -225,7 +225,7 @@
 ## 💡 常见问题
 
 ### Q: RedisClient 和 AsyncRedisSession 有什么区别？
-A: RedisClient 支持超时功能，错误处理更完善，性能几乎相同。详见 [03-comparison-analysis.md](03-comparison-analysis.md)
+A: 两者都支持超时；RedisClient 的对外 API 更完整（含拓扑、发布订阅等能力）且错误处理更统一。详见 [03-comparison-analysis.md](03-comparison-analysis.md)
 
 ### Q: 性能如何？
 A: 性能优秀，与 AsyncRedisSession 相比差异 < 1%。详见 [04-performance-analysis.md](04-performance-analysis.md)

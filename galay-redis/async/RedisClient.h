@@ -297,7 +297,7 @@ namespace galay::redis
      * @brief Redis连接等待体
      * @details 处理连接、认证、选择数据库的完整流程
      */
-    class RedisConnectAwaitable
+    class RedisConnectAwaitable : public galay::kernel::TimeoutSupport<RedisConnectAwaitable>
     {
     public:
         RedisConnectAwaitable(RedisClient& client,
@@ -329,7 +329,7 @@ namespace galay::redis
             Done
         };
 
-        RedisClient& m_client;
+        RedisClient* m_client;
         std::string m_ip;
         int32_t m_port;
         std::string m_username;
@@ -345,6 +345,10 @@ namespace galay::redis
         std::string m_encoded_cmd;
         std::string m_parse_buffer;
         size_t m_sent;
+
+    public:
+        // TimeoutSupport 需要访问此成员来设置超时错误
+        std::expected<void, galay::kernel::IOError> m_result;
     };
 
     /**

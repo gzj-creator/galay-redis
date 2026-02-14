@@ -16,7 +16,7 @@ Coroutine testRedisClientWithTimeout(IOScheduler* scheduler)
     RedisClient client(scheduler);
 
     // 连接到Redis服务器
-    auto connect_result = co_await client.connect("127.0.0.1", 6379);
+    auto connect_result = co_await client.connect("127.0.0.1", 6379).timeout(std::chrono::seconds(5));
     if (!connect_result) {
         std::cerr << "Failed to connect: " << connect_result.error().message() << std::endl;
         co_return;
@@ -120,7 +120,7 @@ Coroutine testConcurrentCommands(IOScheduler* scheduler, int client_id)
 {
     RedisClient client(scheduler);
 
-    auto connect_result = co_await client.connect("127.0.0.1", 6379);
+    auto connect_result = co_await client.connect("127.0.0.1", 6379).timeout(std::chrono::seconds(5));
     if (!connect_result) {
         std::cerr << "Client " << client_id << " failed to connect" << std::endl;
         co_return;

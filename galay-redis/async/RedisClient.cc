@@ -816,7 +816,7 @@ namespace galay::redis
                                                  std::string password,
                                                  int32_t db_index,
                                                  int version)
-        : m_client(client)
+        : m_client(&client)
         , m_ip(std::move(ip))
         , m_port(port)
         , m_username(std::move(username))
@@ -824,6 +824,7 @@ namespace galay::redis
         , m_db_index(db_index)
         , m_version(version)
         , m_state(State::Invalid)
+        , m_result({})
     {
     }
 
@@ -835,7 +836,7 @@ namespace galay::redis
 
             // version 历史上常被传入 RESP 版本(2/3)，这里只把 6 解释为 IPv6，其余默认 IPv4
             Host host(m_version == 6 ? IPType::IPV6 : IPType::IPV4, m_ip, m_port);
-            m_connect_awaitable.emplace(m_client.m_socket.connect(host));
+            m_connect_awaitable.emplace(m_client->m_socket.connect(host));
             return m_connect_awaitable->await_suspend(handle);
         }
         else if (m_state == State::Connecting) {
@@ -857,11 +858,11 @@ namespace galay::redis
                 auth_cmd = {"AUTH", m_username, m_password};
             }
 
-            m_encoded_cmd = m_client.m_encoder.encodeCommand(auth_cmd);
+            m_encoded_cmd = m_client->m_encoder.encodeCommand(auth_cmd);
             m_sent = 0;
 
             // 发送认证命令
-            m_send_awaitable.emplace(m_client.m_socket.send(
+            m_send_awaitable.emplace(m_client->m_socket.send(
                 m_encoded_cmd.c_str(),
                 m_encoded_cmd.size()
             ));
@@ -869,7 +870,7 @@ namespace galay::redis
         }
         else if (m_state == State::Authenticating) {
             // 继续发送认证命令（如果未完成）
-            m_send_awaitable.emplace(m_client.m_socket.send(
+            m_send_awaitable.emplace(m_client->m_socket.send(
                 m_encoded_cmd.c_str() + m_sent,
                 m_encoded_cmd.size() - m_sent
             ));
@@ -885,10 +886,10 @@ namespace galay::redis
 
             // 发送 SELECT 命令
             std::vector<std::string> select_cmd = {"SELECT", std::to_string(m_db_index)};
-            m_encoded_cmd = m_client.m_encoder.encodeCommand(select_cmd);
+            m_encoded_cmd = m_client->m_encoder.encodeCommand(select_cmd);
             m_sent = 0;
 
-            m_send_awaitable.emplace(m_client.m_socket.send(
+            m_send_awaitable.emplace(m_client->m_socket.send(
                 m_encoded_cmd.c_str(),
                 m_encoded_cmd.size()
             ));
@@ -900,13 +901,24 @@ namespace galay::redis
 
     RedisVoidResult RedisConnectAwaitable::await_resume()
     {
+        if (!m_result.has_value()) {
+            auto io_error = m_result.error();
+            m_state = State::Invalid;
+            m_connect_awaitable.reset();
+            m_send_awaitable.reset();
+            m_recv_awaitable.reset();
+            return std::unexpected(
+                RedisError(mapIoErrorToRedisType(io_error, RedisErrorType::REDIS_ERROR_TYPE_TIMEOUT_ERROR),
+                           io_error.message()));
+        }
+
         if (m_state == State::Connecting) {
             // 检查连接结果
             auto connect_result = m_connect_awaitable->await_resume();
 
             if (!connect_result) {
                 // 连接失败
-                RedisLogDebug(m_client.m_logger, "Connection to {}:{} failed: {}",
+                RedisLogDebug(m_client->m_logger, "Connection to {}:{} failed: {}",
                               m_ip, m_port, connect_result.error().message());
                 m_state = State::Invalid;
                 m_connect_awaitable.reset();
@@ -935,7 +947,7 @@ namespace galay::redis
             auto send_result = m_send_awaitable->await_resume();
 
             if (!send_result) {
-                RedisLogDebug(m_client.m_logger, "Send AUTH command failed: {}", send_result.error().message());
+                RedisLogDebug(m_client->m_logger, "Send AUTH command failed: {}", send_result.error().message());
                 m_state = State::Invalid;
                 m_send_awaitable.reset();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_SEND_ERROR,
@@ -950,15 +962,15 @@ namespace galay::redis
             }
 
             // 发送完成，接收认证响应
-            auto iovecs = m_client.m_ring_buffer.getWriteIovecs();
-            m_recv_awaitable.emplace(m_client.m_socket.readv(std::move(iovecs)));
+            auto iovecs = m_client->m_ring_buffer.getWriteIovecs();
+            m_recv_awaitable.emplace(m_client->m_socket.readv(std::move(iovecs)));
             m_recv_awaitable->await_suspend(std::coroutine_handle<>::from_address(nullptr));
             m_recv_awaitable->await_resume();
 
             auto recv_result = m_recv_awaitable->await_resume();
 
             if (!recv_result) {
-                RedisLogDebug(m_client.m_logger, "Receive AUTH response failed: {}", recv_result.error().message());
+                RedisLogDebug(m_client->m_logger, "Receive AUTH response failed: {}", recv_result.error().message());
                 m_state = State::Invalid;
                 m_recv_awaitable.reset();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR,
@@ -967,36 +979,36 @@ namespace galay::redis
 
             size_t n = recv_result.value();
             if (n == 0) {
-                RedisLogDebug(m_client.m_logger, "Connection closed during AUTH");
+                RedisLogDebug(m_client->m_logger, "Connection closed during AUTH");
                 m_state = State::Invalid;
                 m_recv_awaitable.reset();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED,
                                                          "Connection closed"));
             }
 
-            m_client.m_ring_buffer.produce(n);
+            m_client->m_ring_buffer.produce(n);
 
             // 解析认证响应
-            auto read_iovecs = m_client.m_ring_buffer.getReadIovecs();
+            auto read_iovecs = m_client->m_ring_buffer.getReadIovecs();
             if (read_iovecs.empty()) {
-                RedisLogDebug(m_client.m_logger, "AUTH response incomplete");
+                RedisLogDebug(m_client->m_logger, "AUTH response incomplete");
                 return {};  // 继续接收
             }
 
             size_t len = 0;
             const char* data = prepareParseInput(read_iovecs, m_parse_buffer, len);
             if (data == nullptr) {
-                RedisLogDebug(m_client.m_logger, "AUTH response parse buffer unavailable");
+                RedisLogDebug(m_client->m_logger, "AUTH response parse buffer unavailable");
                 return {};
             }
 
-            auto parse_result = m_client.m_parser.parse(data, len);
+            auto parse_result = m_client->m_parser.parse(data, len);
 
             if (!parse_result) {
                 if (parse_result.error() == protocol::ParseError::Incomplete) {
                     return {};  // 继续接收
                 }
-                RedisLogDebug(m_client.m_logger, "Parse AUTH response error");
+                RedisLogDebug(m_client->m_logger, "Parse AUTH response error");
                 m_state = State::Invalid;
                 m_recv_awaitable.reset();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_PARSE_ERROR,
@@ -1004,18 +1016,18 @@ namespace galay::redis
             }
 
             auto [consumed, value] = parse_result.value();
-            m_client.m_ring_buffer.consume(consumed);
+            m_client->m_ring_buffer.consume(consumed);
 
             // 检查认证结果
             if (value.isError()) {
-                RedisLogDebug(m_client.m_logger, "AUTH failed: {}", value.asString());
+                RedisLogDebug(m_client->m_logger, "AUTH failed: {}", value.asString());
                 m_state = State::Invalid;
                 m_recv_awaitable.reset();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_AUTH_ERROR,
                                                          "AUTH failed: " + value.asString()));
             }
 
-            RedisLogDebug(m_client.m_logger, "AUTH succeeded");
+            RedisLogDebug(m_client->m_logger, "AUTH succeeded");
 
             // 认证成功，检查是否需要选择数据库
             if (m_db_index == 0) {
@@ -1033,7 +1045,7 @@ namespace galay::redis
             auto send_result = m_send_awaitable->await_resume();
 
             if (!send_result) {
-                RedisLogDebug(m_client.m_logger, "Send SELECT command failed: {}", send_result.error().message());
+                RedisLogDebug(m_client->m_logger, "Send SELECT command failed: {}", send_result.error().message());
                 m_state = State::Invalid;
                 m_send_awaitable.reset();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_SEND_ERROR,
@@ -1048,15 +1060,15 @@ namespace galay::redis
             }
 
             // 发送完成，接收 SELECT 响应
-            auto iovecs = m_client.m_ring_buffer.getWriteIovecs();
-            m_recv_awaitable.emplace(m_client.m_socket.readv(std::move(iovecs)));
+            auto iovecs = m_client->m_ring_buffer.getWriteIovecs();
+            m_recv_awaitable.emplace(m_client->m_socket.readv(std::move(iovecs)));
             m_recv_awaitable->await_suspend(std::coroutine_handle<>::from_address(nullptr));
             m_recv_awaitable->await_resume();
 
             auto recv_result = m_recv_awaitable->await_resume();
 
             if (!recv_result) {
-                RedisLogDebug(m_client.m_logger, "Receive SELECT response failed: {}", recv_result.error().message());
+                RedisLogDebug(m_client->m_logger, "Receive SELECT response failed: {}", recv_result.error().message());
                 m_state = State::Invalid;
                 m_recv_awaitable.reset();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR,
@@ -1065,36 +1077,36 @@ namespace galay::redis
 
             size_t n = recv_result.value();
             if (n == 0) {
-                RedisLogDebug(m_client.m_logger, "Connection closed during SELECT");
+                RedisLogDebug(m_client->m_logger, "Connection closed during SELECT");
                 m_state = State::Invalid;
                 m_recv_awaitable.reset();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED,
                                                          "Connection closed"));
             }
 
-            m_client.m_ring_buffer.produce(n);
+            m_client->m_ring_buffer.produce(n);
 
             // 解析 SELECT 响应
-            auto read_iovecs = m_client.m_ring_buffer.getReadIovecs();
+            auto read_iovecs = m_client->m_ring_buffer.getReadIovecs();
             if (read_iovecs.empty()) {
-                RedisLogDebug(m_client.m_logger, "SELECT response incomplete");
+                RedisLogDebug(m_client->m_logger, "SELECT response incomplete");
                 return {};  // 继续接收
             }
 
             size_t len = 0;
             const char* data = prepareParseInput(read_iovecs, m_parse_buffer, len);
             if (data == nullptr) {
-                RedisLogDebug(m_client.m_logger, "SELECT response parse buffer unavailable");
+                RedisLogDebug(m_client->m_logger, "SELECT response parse buffer unavailable");
                 return {};
             }
 
-            auto parse_result = m_client.m_parser.parse(data, len);
+            auto parse_result = m_client->m_parser.parse(data, len);
 
             if (!parse_result) {
                 if (parse_result.error() == protocol::ParseError::Incomplete) {
                     return {};  // 继续接收
                 }
-                RedisLogDebug(m_client.m_logger, "Parse SELECT response error");
+                RedisLogDebug(m_client->m_logger, "Parse SELECT response error");
                 m_state = State::Invalid;
                 m_recv_awaitable.reset();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_PARSE_ERROR,
@@ -1102,18 +1114,18 @@ namespace galay::redis
             }
 
             auto [consumed, value] = parse_result.value();
-            m_client.m_ring_buffer.consume(consumed);
+            m_client->m_ring_buffer.consume(consumed);
 
             // 检查 SELECT 结果
             if (value.isError()) {
-                RedisLogDebug(m_client.m_logger, "SELECT failed: {}", value.asString());
+                RedisLogDebug(m_client->m_logger, "SELECT failed: {}", value.asString());
                 m_state = State::Invalid;
                 m_recv_awaitable.reset();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_INVALID_ERROR,
                                                          "SELECT failed: " + value.asString()));
             }
 
-            RedisLogDebug(m_client.m_logger, "SELECT succeeded, db_index: {}", m_db_index);
+            RedisLogDebug(m_client->m_logger, "SELECT succeeded, db_index: {}", m_db_index);
 
             // 完成
             m_state = State::Done;
@@ -1127,7 +1139,7 @@ namespace galay::redis
         }
 
         // Invalid 状态
-        RedisLogError(m_client.m_logger, "await_resume called in Invalid state");
+        RedisLogError(m_client->m_logger, "await_resume called in Invalid state");
         m_state = State::Invalid;
         return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
                                                  "RedisConnectAwaitable in Invalid state"));

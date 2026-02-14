@@ -178,13 +178,15 @@ Coroutine runTopologyAndPubSubTests(IOScheduler* scheduler)
                 break;
             }
 
-            auto write_auto = co_await ms_auto.executeWriteAuto("SET", {"galay:test:auto:ms", "ok"});
+            auto write_auto = co_await ms_auto.executeWriteAuto("SET", {"galay:test:auto:ms", "ok"})
+                                       .timeout(std::chrono::seconds(5));
             if (!write_auto) {
                 fail("executeWriteAuto failed: " + write_auto.error().message());
                 break;
             }
 
-            auto read_auto = co_await ms_auto.executeReadAuto("GET", {"galay:test:auto:ms"});
+            auto read_auto = co_await ms_auto.executeReadAuto("GET", {"galay:test:auto:ms"})
+                                      .timeout(std::chrono::seconds(5));
             std::string read_auto_value;
             if (!expectSingleStringResult(read_auto, &read_auto_value)) {
                 break;

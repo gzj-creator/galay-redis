@@ -101,7 +101,12 @@ Coroutine testWithTimeout(IOScheduler* scheduler)
 {
     RedisClient client(scheduler);
 
-    co_await client.connect("127.0.0.1", 6379);
+    // 连接 Awaitable 同样支持 timeout
+    auto conn = co_await client.connect("127.0.0.1", 6379).timeout(std::chrono::seconds(3));
+    if (!conn) {
+        std::cout << "Connect error: " << conn.error().message() << std::endl;
+        co_return;
+    }
 
     // 设置5秒超时
     auto result = co_await client.get("mykey").timeout(std::chrono::seconds(5));
@@ -121,6 +126,24 @@ Coroutine testWithTimeout(IOScheduler* scheduler)
         // 使用values...
     }
 }
+```
+
+### 其他 Awaitable 的 timeout 示例
+
+```cpp
+// 拓扑自动命令
+RedisMasterSlaveClient ms(scheduler);
+auto write = co_await ms.executeWriteAuto("SET", {"k", "v"}).timeout(std::chrono::seconds(5));
+
+// 集群自动路由
+RedisClusterClient cluster(scheduler);
+auto get = co_await cluster.executeByKeyAuto("{u1}:name", "GET", {"{u1}:name"})
+                        .timeout(std::chrono::seconds(5));
+
+// 连接池
+RedisConnectionPool pool(scheduler, ConnectionPoolConfig::defaultConfig());
+co_await pool.initialize().timeout(std::chrono::seconds(5));
+auto conn = co_await pool.acquire().timeout(std::chrono::seconds(2));
 ```
 
 ### Pipeline批处理
@@ -388,8 +411,10 @@ RedisClusterClient cluster(scheduler);
 cluster.setAutoRefreshInterval(std::chrono::seconds(5));
 
 // 自动模式：遇到 MOVED/ASK 会自动重定向，并在需要时刷新 slots
-auto set_result = co_await cluster.executeByKeyAuto("{u300}:name", "SET", {"{u300}:name", "bob"});
-auto get_result = co_await cluster.executeByKeyAuto("{u300}:name", "GET", {"{u300}:name"});
+auto set_result = co_await cluster.executeByKeyAuto("{u300}:name", "SET", {"{u300}:name", "bob"})
+                        .timeout(std::chrono::seconds(5));
+auto get_result = co_await cluster.executeByKeyAuto("{u300}:name", "GET", {"{u300}:name"})
+                        .timeout(std::chrono::seconds(5));
 ```
 
 ### Sentinel 自动故障转移
@@ -404,11 +429,11 @@ sentinel.port = 26379;
 co_await ms.addSentinel(sentinel);
 
 // 主从拓扑由 Sentinel 自动刷新
-auto refresh = co_await ms.refreshFromSentinel();
+auto refresh = co_await ms.refreshFromSentinel().timeout(std::chrono::seconds(5));
 
 // 自动写入：主库不可用时会触发 Sentinel 刷新并重试
-auto write = co_await ms.executeWriteAuto("SET", {"k", "v"});
-auto read = co_await ms.executeReadAuto("GET", {"k"});
+auto write = co_await ms.executeWriteAuto("SET", {"k", "v"}).timeout(std::chrono::seconds(5));
+auto read = co_await ms.executeReadAuto("GET", {"k"}).timeout(std::chrono::seconds(5));
 ```
 
 ## 性能测试

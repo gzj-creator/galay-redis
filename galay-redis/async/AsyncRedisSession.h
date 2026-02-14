@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <galay-kernel/async/TcpSocket.h>
 #include <galay-kernel/kernel/IOScheduler.hpp>
+#include <galay-kernel/kernel/Timeout.hpp>
 #include <galay-kernel/common/Host.hpp>
 #include <galay-kernel/common/Buffer.h>
 #include <galay-kernel/common/Error.h>
@@ -42,7 +43,7 @@ namespace galay::redis
      * @brief Redis命令执行等待体
      * @details 自动处理完整的命令发送和响应接收流程
      */
-    class ExecuteAwaitable
+    class ExecuteAwaitable : public galay::kernel::TimeoutSupport<ExecuteAwaitable>
     {
     public:
         ExecuteAwaitable(AsyncRedisSession& session,
@@ -63,7 +64,7 @@ namespace galay::redis
             Receiving
         };
 
-        AsyncRedisSession& m_session;
+        AsyncRedisSession* m_session;
         std::string m_cmd;
         std::vector<std::string> m_args;
         std::string m_encoded_cmd;
@@ -74,12 +75,16 @@ namespace galay::redis
 
         std::optional<SendAwaitable> m_send_awaitable;
         std::optional<ReadvAwaitable> m_recv_awaitable;
+
+    public:
+        // TimeoutSupport 需要访问此成员来设置超时错误
+        std::expected<RedisResult, galay::kernel::IOError> m_result;
     };
 
     /**
      * @brief Redis Pipeline等待体
      */
-    class PipelineAwaitable
+    class PipelineAwaitable : public galay::kernel::TimeoutSupport<PipelineAwaitable>
     {
     public:
         PipelineAwaitable(AsyncRedisSession& session,
@@ -98,7 +103,7 @@ namespace galay::redis
             Receiving
         };
 
-        AsyncRedisSession& m_session;
+        AsyncRedisSession* m_session;
         std::vector<std::vector<std::string>> m_commands;
         std::string m_encoded_batch;
         std::vector<RedisValue> m_values;
@@ -107,12 +112,16 @@ namespace galay::redis
 
         std::optional<SendAwaitable> m_send_awaitable;
         std::optional<ReadvAwaitable> m_recv_awaitable;
+
+    public:
+        // TimeoutSupport 需要访问此成员来设置超时错误
+        std::expected<RedisResult, galay::kernel::IOError> m_result;
     };
 
     /**
      * @brief Redis连接等待体
      */
-    class ConnectAwaitable
+    class ConnectAwaitable : public galay::kernel::TimeoutSupport<ConnectAwaitable>
     {
     public:
         ConnectAwaitable(AsyncRedisSession& session,
@@ -138,7 +147,7 @@ namespace galay::redis
             Done
         };
 
-        AsyncRedisSession& m_session;
+        AsyncRedisSession* m_session;
         std::string m_ip;
         int32_t m_port;
         std::string m_username;
@@ -153,6 +162,10 @@ namespace galay::redis
         std::vector<RedisValue> m_temp_values;
         std::string m_encoded_cmd;
         size_t m_sent;
+
+    public:
+        // TimeoutSupport 需要访问此成员来设置超时错误
+        std::expected<RedisVoidResult, galay::kernel::IOError> m_result;
     };
 
     /**

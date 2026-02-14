@@ -77,6 +77,7 @@ namespace galay::redis
         std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> waiter)
         : m_waiter(std::move(waiter))
         , m_awaitable(m_waiter.get())
+        , m_result(RedisCommandResult{})
     {
     }
 
@@ -93,6 +94,10 @@ namespace galay::redis
 
     RedisCommandResult RedisCommandResultAwaitable::await_resume() noexcept
     {
+        if (!m_result) {
+            return std::unexpected(ioErrorToRedisError(m_result.error()));
+        }
+
         auto wait_result = m_awaitable.await_resume();
         if (!wait_result) {
             return std::unexpected(ioErrorToRedisError(wait_result.error()));

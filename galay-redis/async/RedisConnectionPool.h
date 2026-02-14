@@ -136,7 +136,7 @@ namespace galay::redis
     /**
      * @brief 连接池初始化等待体
      */
-    class PoolInitializeAwaitable
+    class PoolInitializeAwaitable : public galay::kernel::TimeoutSupport<PoolInitializeAwaitable>
     {
     public:
         PoolInitializeAwaitable(RedisConnectionPool& pool);
@@ -146,14 +146,18 @@ namespace galay::redis
         RedisVoidResult await_resume();
 
     private:
-        RedisConnectionPool& m_pool;
+        RedisConnectionPool* m_pool;
         size_t m_created_count = 0;
+
+    public:
+        // TimeoutSupport 需要访问此成员来设置超时错误
+        std::expected<RedisVoidResult, galay::kernel::IOError> m_result;
     };
 
     /**
      * @brief 连接池获取连接等待体
      */
-    class PoolAcquireAwaitable
+    class PoolAcquireAwaitable : public galay::kernel::TimeoutSupport<PoolAcquireAwaitable>
     {
     public:
         PoolAcquireAwaitable(RedisConnectionPool& pool);
@@ -163,9 +167,13 @@ namespace galay::redis
         std::expected<std::shared_ptr<PooledConnection>, RedisError> await_resume();
 
     private:
-        RedisConnectionPool& m_pool;
+        RedisConnectionPool* m_pool;
         std::shared_ptr<PooledConnection> m_conn;
         std::chrono::steady_clock::time_point m_start_time;
+
+    public:
+        // TimeoutSupport 需要访问此成员来设置超时错误
+        std::expected<std::expected<std::shared_ptr<PooledConnection>, RedisError>, galay::kernel::IOError> m_result;
     };
 
     /**

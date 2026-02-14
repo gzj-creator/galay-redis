@@ -16,7 +16,7 @@ namespace galay::redis
 {
     using RedisCommandResult = std::expected<std::vector<RedisValue>, RedisError>;
 
-    class RedisCommandResultAwaitable
+    class RedisCommandResultAwaitable : public galay::kernel::TimeoutSupport<RedisCommandResultAwaitable>
     {
     public:
         explicit RedisCommandResultAwaitable(
@@ -29,6 +29,10 @@ namespace galay::redis
     private:
         std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> m_waiter;
         galay::kernel::AsyncWaiterAwaitable<RedisCommandResult> m_awaitable;
+
+    public:
+        // TimeoutSupport 需要访问此成员来设置超时错误
+        std::expected<RedisCommandResult, galay::kernel::IOError> m_result;
     };
 
     struct RedisNodeAddress

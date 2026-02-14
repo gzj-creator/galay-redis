@@ -21,7 +21,7 @@ RedisClient
 - 完整的资源管理（reset方法）
 - 统一的错误处理流程
 
-### AsyncRedisSession (旧实现)
+### AsyncRedisSession (当前实现)
 
 ```
 AsyncRedisSession
@@ -34,7 +34,7 @@ AsyncRedisSession
 ```
 
 **设计模式**: 自定义实现
-- 无超时支持
+- 支持 Awaitable `.timeout()`（Execute/Pipeline/Connect）
 - 基础的错误处理
 - 手动资源管理
 
@@ -42,8 +42,8 @@ AsyncRedisSession
 
 | 功能特性 | RedisClient | AsyncRedisSession | 说明 |
 |---------|-------------|-------------------|------|
-| **超时支持** | ✅ | ❌ | RedisClient支持`.timeout()`方法 |
-| **TimeoutSupport继承** | ✅ | ❌ | 统一的超时处理机制 |
+| **超时支持** | ✅ | ✅ | 两者 Awaitable 都支持`.timeout()` |
+| **TimeoutSupport继承** | ✅ | ✅ | 统一的超时处理机制 |
 | **错误类型转换** | ✅ | ⚠️ | IOError → RedisError自动转换 |
 | **资源自动清理** | ✅ | ⚠️ | reset()方法确保资源释放 |
 | **状态机设计** | ✅ | ✅ | 两者都使用状态机 |
@@ -76,8 +76,8 @@ if (!result) {
 AsyncRedisSession session(scheduler);
 co_await session.connect("127.0.0.1", 6379);
 
-// 不支持超时
-auto result = co_await session.get("key");
+// 同样支持超时
+auto result = co_await session.get("key").timeout(std::chrono::seconds(5));
 
 if (!result) {
     std::cout << "Error: " << result.error().message() << std::endl;
@@ -182,12 +182,18 @@ RedisClientAwaitable::await_resume()
 }
 ```
 
-#### ExecuteAwaitable::await_resume() (旧)
+#### ExecuteAwaitable::await_resume() (当前)
 ```cpp
 std::expected<std::optional<std::vector<RedisValue>>, RedisError>
 ExecuteAwaitable::await_resume()
 {
-    // 没有超时检查
+    // 已支持超时检查（由 TimeoutSupport 设置 m_result）
+    if (!m_result.has_value()) {
+        m_state = State::Invalid;
+        m_send_awaitable.reset();
+        m_recv_awaitable.reset();
+        return std::unexpected(RedisError(...));
+    }
 
     if (m_state == State::Sending) {
         auto send_result = m_send_awaitable->await_resume();
@@ -255,8 +261,8 @@ ExecuteAwaitable::await_resume()
 
 ⚠️ **可以继续使用**:
 1. 已有稳定运行的代码
-2. 不需要超时功能
-3. 性能极度敏感（省略超时检查）
+2. 倾向更轻量的会话封装
+3. 代码已深度依赖现有接口
 
 ### 迁移步骤
 
@@ -297,7 +303,7 @@ ExecuteAwaitable::await_resume()
 
 ⚠️ **需要注意**:
 - 类名不同（AsyncRedisSession vs RedisClient）
-- 新增了超时功能（可选使用）
+- 两者都支持超时功能（可选使用）
 - 错误类型更详细
 
 ### 二进制兼容性
@@ -378,8 +384,8 @@ if (!result) {
 🎯 **新项目强烈推荐使用 RedisClient**
 
 对于已有项目：
-- 如果需要超时功能 → 迁移到 RedisClient
-- 如果不需要超时功能 → 可以继续使用 AsyncRedisSession
+- 如果需要拓扑能力（Cluster/Sentinel/PubSub）→ 迁移到 RedisClient 体系
+- 如果只需基础命令并维持现有接口 → 可以继续使用 AsyncRedisSession
 - 两者可以共存，逐步迁移
 
 ## 参考资料
