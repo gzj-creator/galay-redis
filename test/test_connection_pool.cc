@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <vector>
 #include <chrono>
+#include <thread>
 
 using namespace galay::redis;
 using namespace galay::kernel;
@@ -51,7 +52,16 @@ Coroutine testBasicConnectionPool(IOScheduler* scheduler)
 
     // 使用连接执行命令
     std::cout << "\n3. Testing command execution..." << std::endl;
-    auto ping_result = co_await conn->get()->ping();
+    auto redis_client = conn->get();
+    auto connect_result = co_await redis_client->connect("127.0.0.1", 6379);
+    if (!connect_result) {
+        std::cerr << "   [FAILED] Connection bootstrap failed: " << connect_result.error().message() << std::endl;
+        pool.release(conn);
+        pool.shutdown();
+        co_return;
+    }
+
+    auto ping_result = co_await redis_client->ping();
     if (ping_result && ping_result.value()) {
         auto& values = ping_result.value().value();
         if (!values.empty() && values[0].isString()) {

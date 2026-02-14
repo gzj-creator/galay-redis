@@ -502,3 +502,21 @@ if (duration.count() > 1000) {  // > 1ms
 **性能等级**: ⭐⭐⭐⭐⭐ (5/5)
 **功能等级**: ⭐⭐⭐⭐⭐ (5/5)
 **推荐指数**: ⭐⭐⭐⭐⭐ (5/5)
+
+## 11. 最新实测数据（2026-02-14）
+
+测试环境：
+- 本地 Redis：`127.0.0.1:6379`
+- 执行命令：`./build/test/test_redis_client_benchmark ...`
+- 说明：基准程序已修复为“等待所有客户端完成后立即统计”，`ops/sec` 可反映实际吞吐。
+
+| 场景 | 命令 | Total time | Successful | Failed | Timeout | Ops/sec | Success rate |
+|------|------|------------|------------|--------|---------|---------|--------------|
+| 普通模式（小规模） | `./build/test/test_redis_client_benchmark 10 100` | 75ms | 2000 | 0 | 0 | 26666 | 100% |
+| 普通模式（压测） | `./build/test/test_redis_client_benchmark 50 500` | 445ms | 50000 | 0 | 0 | 112359 | 100% |
+| Pipeline 压测 | `./build/test/test_redis_client_benchmark 20 5000 pipeline 100` | 91ms | 100000 | 0 | 0 | 1098901 | 100% |
+
+结论（基于本次实测）：
+1. 功能稳定性：三组压测均为 100% 成功率，无超时。
+2. 普通模式吞吐：高并发场景可稳定达到 10 万级 ops/sec。
+3. Pipeline 吞吐：单机本地环回环境达到百万级 ops/sec。

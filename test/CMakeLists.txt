@@ -23,7 +23,6 @@ foreach(SRC ${SRC_LIST})
         galay-redis
         OpenSSL::SSL
         OpenSSL::Crypto
-        pthread
     )
     # 为每个目标明确设置包含目录
     target_include_directories(${EXECUTABLE_NAME} PRIVATE 

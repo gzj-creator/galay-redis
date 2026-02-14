@@ -2,335 +2,800 @@
 #include "base/RedisError.h"
 #include "base/RedisLog.h"
 #include <galay-utils/system/System.hpp>
+#include <sys/uio.h>
 #include <regex>
 
 namespace galay::redis
 {
+    namespace
+    {
+        RedisErrorType mapIoErrorToRedisType(const IOError& io_error, RedisErrorType fallback)
+        {
+            if (IOError::contains(io_error.code(), galay::kernel::kTimeout)) {
+                return RedisErrorType::REDIS_ERROR_TYPE_TIMEOUT_ERROR;
+            }
+            if (IOError::contains(io_error.code(), galay::kernel::kDisconnectError)) {
+                return RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED;
+            }
+            return fallback;
+        }
+
+        size_t decimalDigits(size_t value)
+        {
+            size_t digits = 1;
+            while (value >= 10) {
+                value /= 10;
+                ++digits;
+            }
+            return digits;
+        }
+
+        size_t estimateRespCommandBytes(const std::vector<std::string>& cmd_parts)
+        {
+            size_t total = 1 + decimalDigits(cmd_parts.size()) + 2;
+            for (const auto& part : cmd_parts) {
+                total += 1 + decimalDigits(part.size()) + 2 + part.size() + 2;
+            }
+            return total;
+        }
+
+        const char* prepareParseInput(const std::vector<struct iovec>& read_iovecs,
+                                      std::string& parse_buffer,
+                                      size_t& len)
+        {
+            if (read_iovecs.empty()) {
+                len = 0;
+                return nullptr;
+            }
+
+            if (read_iovecs.size() == 1) {
+                len = read_iovecs[0].iov_len;
+                return static_cast<const char*>(read_iovecs[0].iov_base);
+            }
+
+            len = 0;
+            for (const auto& iov : read_iovecs) {
+                len += iov.iov_len;
+            }
+
+            parse_buffer.clear();
+            parse_buffer.reserve(len);
+            for (const auto& iov : read_iovecs) {
+                parse_buffer.append(static_cast<const char*>(iov.iov_base), iov.iov_len);
+            }
+            return parse_buffer.data();
+        }
+    }
+
     // ======================== RedisClientAwaitable 实现 ========================
+
+    RedisClientAwaitable::ProtocolSendAwaitable::ProtocolSendAwaitable(RedisClientAwaitable* owner)
+        : SendAwaitable(owner && owner->m_client ? owner->m_client->m_socket.controller() : nullptr,
+                        nullptr, 0)
+        , m_owner(owner)
+    {
+        rebind(owner);
+    }
+
+    void RedisClientAwaitable::ProtocolSendAwaitable::rebind(RedisClientAwaitable* owner)
+    {
+        m_owner = owner;
+        m_controller = (m_owner && m_owner->m_client) ? m_owner->m_client->m_socket.controller() : nullptr;
+        if (m_owner) {
+            m_buffer = m_owner->m_encoded_cmd.data();
+            m_length = m_owner->m_encoded_cmd.size();
+        } else {
+            m_buffer = nullptr;
+            m_length = 0;
+        }
+    }
+
+#ifdef USE_IOURING
+    bool RedisClientAwaitable::ProtocolSendAwaitable::handleComplete(struct io_uring_cqe* cqe, GHandle)
+    {
+        if (m_length == 0) {
+            return true;
+        }
+        if (cqe == nullptr) {
+            return false;
+        }
+
+        auto result = galay::kernel::io::handleSend(cqe);
+        if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
+            return false;
+        }
+        if (!result) {
+            m_owner->setSendError(result.error());
+            return true;
+        }
+
+        const size_t sent = result.value();
+        if (sent == 0) {
+            return false;
+        }
+
+        m_buffer += sent;
+        m_length -= sent;
+        return m_length == 0;
+    }
+#else
+    bool RedisClientAwaitable::ProtocolSendAwaitable::handleComplete(GHandle handle)
+    {
+        while (m_length > 0) {
+            auto result = galay::kernel::io::handleSend(handle, m_buffer, m_length);
+            if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
+                return false;
+            }
+            if (!result) {
+                m_owner->setSendError(result.error());
+                return true;
+            }
+
+            const size_t sent = result.value();
+            if (sent == 0) {
+                return false;
+            }
+
+            m_buffer += sent;
+            m_length -= sent;
+        }
+        return true;
+    }
+#endif
+
+    RedisClientAwaitable::ProtocolRecvAwaitable::ProtocolRecvAwaitable(RedisClientAwaitable* owner)
+        : RecvAwaitable(owner && owner->m_client ? owner->m_client->m_socket.controller() : nullptr,
+                        nullptr, 0)
+        , m_owner(owner)
+    {
+        rebind(owner);
+    }
+
+    void RedisClientAwaitable::ProtocolRecvAwaitable::rebind(RedisClientAwaitable* owner)
+    {
+        m_owner = owner;
+        m_controller = (m_owner && m_owner->m_client) ? m_owner->m_client->m_socket.controller() : nullptr;
+        m_buffer = nullptr;
+        m_length = 0;
+    }
+
+    bool RedisClientAwaitable::ProtocolRecvAwaitable::prepareRecvWindow()
+    {
+        auto write_iovecs = m_owner->m_client->m_ring_buffer.getWriteIovecs();
+        if (write_iovecs.empty()) {
+            return false;
+        }
+
+        m_buffer = static_cast<char*>(write_iovecs[0].iov_base);
+        m_length = write_iovecs[0].iov_len;
+        return m_length > 0;
+    }
+
+#ifdef USE_IOURING
+    bool RedisClientAwaitable::ProtocolRecvAwaitable::handleComplete(struct io_uring_cqe* cqe, GHandle)
+    {
+        if (m_owner->parseResponsesFromRingBuffer()) {
+            return true;
+        }
+
+        if (cqe == nullptr) {
+            if (!prepareRecvWindow()) {
+                m_owner->setBufferOverflowError();
+                return true;
+            }
+            return false;
+        }
+
+        auto result = galay::kernel::io::handleRecv(cqe, m_buffer);
+        if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
+            return false;
+        }
+        if (!result) {
+            m_owner->setRecvError(result.error());
+            return true;
+        }
+
+        const size_t recv_bytes = result.value().size();
+        if (recv_bytes == 0) {
+            m_owner->setConnectionClosedError();
+            return true;
+        }
+
+        m_owner->m_client->m_ring_buffer.produce(recv_bytes);
+        if (m_owner->parseResponsesFromRingBuffer()) {
+            return true;
+        }
+
+        if (!prepareRecvWindow()) {
+            m_owner->setBufferOverflowError();
+            return true;
+        }
+        return false;
+    }
+#else
+    bool RedisClientAwaitable::ProtocolRecvAwaitable::handleComplete(GHandle handle)
+    {
+        if (m_owner->parseResponsesFromRingBuffer()) {
+            return true;
+        }
+
+        while (true) {
+            if (!prepareRecvWindow()) {
+                m_owner->setBufferOverflowError();
+                return true;
+            }
+
+            auto result = galay::kernel::io::handleRecv(handle, m_buffer, m_length);
+            if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
+                return false;
+            }
+            if (!result) {
+                m_owner->setRecvError(result.error());
+                return true;
+            }
+
+            const size_t recv_bytes = result.value().size();
+            if (recv_bytes == 0) {
+                m_owner->setConnectionClosedError();
+                return true;
+            }
+
+            m_owner->m_client->m_ring_buffer.produce(recv_bytes);
+            if (m_owner->parseResponsesFromRingBuffer()) {
+                return true;
+            }
+        }
+    }
+#endif
 
     RedisClientAwaitable::RedisClientAwaitable(RedisClient& client,
                                                std::string cmd,
                                                std::vector<std::string> args,
                                                size_t expected_replies)
-        : m_client(client)
+        : CustomAwaitable(client.m_socket.controller())
+        , m_client(&client)
         , m_cmd(std::move(cmd))
         , m_args(std::move(args))
         , m_expected_replies(expected_replies)
-        , m_state(State::Invalid)
-        , m_sent(0)
+        , m_state(State::Running)
+        , m_send_awaitable(this)
+        , m_recv_awaitable(this)
+        , m_result(std::nullopt)
     {
-        // 编码命令
         std::vector<std::string> cmd_parts;
-        cmd_parts.reserve(1 + m_args.size());  // 预分配内存
+        cmd_parts.reserve(1 + m_args.size());
         cmd_parts.push_back(m_cmd);
         cmd_parts.insert(cmd_parts.end(), m_args.begin(), m_args.end());
-        m_encoded_cmd = m_client.m_encoder.encodeCommand(cmd_parts);
+        m_encoded_cmd = m_client->m_encoder.encodeCommand(cmd_parts);
 
-        // 预分配响应值的内存
         m_values.reserve(m_expected_replies);
+        m_send_awaitable.rebind(this);
+        m_recv_awaitable.rebind(this);
+        initTaskQueue();
     }
 
-    bool RedisClientAwaitable::await_suspend(std::coroutine_handle<> handle)
+    RedisClientAwaitable::RedisClientAwaitable(RedisClientAwaitable&& other) noexcept
+        : CustomAwaitable(other.m_client ? other.m_client->m_socket.controller() : nullptr)
+        , m_client(nullptr)
+        , m_expected_replies(0)
+        , m_state(State::Invalid)
+        , m_send_awaitable(this)
+        , m_recv_awaitable(this)
     {
-        if (m_state == State::Invalid) {
-            // Invalid 状态，开始发送命令
-            m_state = State::Sending;
-            m_send_awaitable.emplace(m_client.m_socket.send(
-                m_encoded_cmd.c_str() + m_sent,
-                m_encoded_cmd.size() - m_sent
-            ));
-            return m_send_awaitable->await_suspend(handle);
-        }
-        else if (m_state == State::Sending) {
-            // 继续发送命令（重新创建 awaitable）
-            m_send_awaitable.emplace(m_client.m_socket.send(
-                m_encoded_cmd.c_str() + m_sent,
-                m_encoded_cmd.size() - m_sent
-            ));
-            return m_send_awaitable->await_suspend(handle);
-        }
-        else {
-            // Receiving 状态，接收响应（重新创建 awaitable）
-            auto iovecs = m_client.m_ring_buffer.getWriteIovecs();
-            m_recv_awaitable.emplace(m_client.m_socket.readv(std::move(iovecs)));
-            return m_recv_awaitable->await_suspend(handle);
-        }
+        moveFrom(std::move(other));
     }
 
-    std::expected<std::optional<std::vector<RedisValue>>, RedisError>
-    RedisClientAwaitable::await_resume()
+    RedisClientAwaitable& RedisClientAwaitable::operator=(RedisClientAwaitable&& other) noexcept
     {
-        // 首先检查是否有超时错误（由 TimeoutSupport 设置）
-        if (!m_result.has_value()) {
-            // m_result 已被 TimeoutSupport 设置为 IOError，需要转换为 RedisError
-            auto& io_error = m_result.error();
-            RedisLogDebug(m_client.m_logger, "command failed with IO error: {}", io_error.message());
+        if (this != &other) {
+            moveFrom(std::move(other));
+        }
+        return *this;
+    }
 
-            // 将 IOError 转换为 RedisError
-            RedisErrorType redis_error_type;
-            if (io_error.code() == galay::kernel::kTimeout) {
-                redis_error_type = RedisErrorType::REDIS_ERROR_TYPE_TIMEOUT_ERROR;
-            } else if (io_error.code() == galay::kernel::kDisconnectError) {
-                redis_error_type = RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED;
-            } else {
-                redis_error_type = RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR;
+    void RedisClientAwaitable::moveFrom(RedisClientAwaitable&& other) noexcept
+    {
+        m_controller = other.m_controller;
+        m_waker = std::move(other.m_waker);
+
+        m_client = other.m_client;
+        m_cmd = std::move(other.m_cmd);
+        m_args = std::move(other.m_args);
+        m_encoded_cmd = std::move(other.m_encoded_cmd);
+        m_parse_buffer = std::move(other.m_parse_buffer);
+        m_expected_replies = other.m_expected_replies;
+        m_values = std::move(other.m_values);
+        m_state = other.m_state;
+        m_internal_error = std::move(other.m_internal_error);
+        m_result = std::move(other.m_result);
+
+        m_send_awaitable.rebind(this);
+        m_recv_awaitable.rebind(this);
+        if (m_state == State::Running) {
+            initTaskQueue();
+        } else {
+            m_tasks.clear();
+            m_cursor = 0;
+        }
+
+        other.markMovedFrom();
+    }
+
+    void RedisClientAwaitable::markMovedFrom() noexcept
+    {
+        m_state = State::Invalid;
+        m_client = nullptr;
+        m_tasks.clear();
+        m_cursor = 0;
+        m_internal_error.reset();
+        m_values.clear();
+        m_parse_buffer.clear();
+        m_result = std::nullopt;
+        m_send_awaitable.rebind(this);
+        m_recv_awaitable.rebind(this);
+    }
+
+    void RedisClientAwaitable::initTaskQueue()
+    {
+        m_tasks.clear();
+        m_cursor = 0;
+        addTask(IOEventType::SEND, &m_send_awaitable);
+        addTask(IOEventType::RECV, &m_recv_awaitable);
+    }
+
+    bool RedisClientAwaitable::parseResponsesFromRingBuffer()
+    {
+        while (m_values.size() < m_expected_replies) {
+            auto read_iovecs = m_client->m_ring_buffer.getReadIovecs();
+            if (read_iovecs.empty()) {
+                return false;
             }
 
+            size_t len = 0;
+            const char* data = prepareParseInput(read_iovecs, m_parse_buffer, len);
+            if (data == nullptr) {
+                return false;
+            }
+
+            auto parse_result = m_client->m_parser.parse(data, len);
+            if (parse_result) {
+                auto [consumed, value] = parse_result.value();
+                m_client->m_ring_buffer.consume(consumed);
+                m_values.push_back(RedisValue(value));
+                continue;
+            }
+
+            if (parse_result.error() == protocol::ParseError::Incomplete) {
+                return false;
+            }
+
+            setParseError();
+            return true;
+        }
+        return true;
+    }
+
+    void RedisClientAwaitable::setSendError(const IOError& io_error)
+    {
+        m_internal_error = RedisError(RedisErrorType::REDIS_ERROR_TYPE_SEND_ERROR, io_error.message());
+    }
+
+    void RedisClientAwaitable::setRecvError(const IOError& io_error)
+    {
+        if (IOError::contains(io_error.code(), galay::kernel::kDisconnectError)) {
+            setConnectionClosedError();
+            return;
+        }
+        m_internal_error = RedisError(RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR, io_error.message());
+    }
+
+    void RedisClientAwaitable::setParseError()
+    {
+        m_internal_error = RedisError(RedisErrorType::REDIS_ERROR_TYPE_PARSE_ERROR, "Parse error");
+    }
+
+    void RedisClientAwaitable::setConnectionClosedError()
+    {
+        m_internal_error = RedisError(RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED, "Connection closed");
+    }
+
+    void RedisClientAwaitable::setBufferOverflowError()
+    {
+        m_internal_error = RedisError(RedisErrorType::REDIS_ERROR_TYPE_BUFFER_OVERFLOW_ERROR,
+                                      "Ring buffer exhausted before parsing complete response");
+    }
+
+    std::expected<std::optional<std::vector<RedisValue>>, RedisError> RedisClientAwaitable::await_resume()
+    {
+        onCompleted();
+
+        if (m_state == State::Invalid) {
+            return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
+                                              "RedisClientAwaitable in Invalid state"));
+        }
+
+        if (!m_result.has_value()) {
+            auto& io_error = m_result.error();
+            const auto redis_error_type = mapIoErrorToRedisType(
+                io_error, RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR);
+            RedisLogDebug(m_client->m_logger, "command failed with IO error: {}", io_error.message());
             reset();
             return std::unexpected(RedisError(redis_error_type, io_error.message()));
         }
 
-        if (m_state == State::Sending) {
-            // 检查发送结果
-            auto send_result = m_send_awaitable->await_resume();
-
-            if (!send_result) {
-                // 发送错误，清理资源并重置为 Invalid 状态
-                RedisLogDebug(m_client.m_logger, "send command failed: {}", send_result.error().message());
-                reset();
-                return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_SEND_ERROR,
-                                                 send_result.error().message()));
-            }
-
-            m_sent += send_result.value();
-
-            if (m_sent < m_encoded_cmd.size()) {
-                // 发送未完成，保持 Sending 状态
-                RedisLogDebug(m_client.m_logger, "send command incomplete, continue sending");
-                return std::nullopt;
-            }
-
-            // 发送完成，立刻切换到 Receiving 状态
-            RedisLogDebug(m_client.m_logger, "send command completed, start receiving response");
-            m_state = State::Receiving;
-            m_send_awaitable.reset();
-            return std::nullopt;
-        }
-        else if (m_state == State::Receiving) {
-            // Receiving 状态，检查接收结果
-            auto recv_result = m_recv_awaitable->await_resume();
-
-            if (!recv_result) {
-                // 接收错误，清理资源并重置为 Invalid 状态
-                RedisLogDebug(m_client.m_logger, "receive response failed: {}", recv_result.error().message());
-                reset();
-                return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR,
-                                                 recv_result.error().message()));
-            }
-
-            size_t n = recv_result.value();
-            if (n == 0) {
-                // 连接关闭
-                RedisLogDebug(m_client.m_logger, "connection closed by peer");
-                reset();
-                return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED,
-                                                 "Connection closed"));
-            }
-
-            m_client.m_ring_buffer.produce(n);
-
-            // 解析响应
-            while (m_values.size() < m_expected_replies) {
-                auto read_iovecs = m_client.m_ring_buffer.getReadIovecs();
-                if (read_iovecs.empty()) {
-                    // 需要继续接收
-                    RedisLogDebug(m_client.m_logger, "response incomplete, continue receiving");
-                    return std::nullopt;
-                }
-
-                const char* data = static_cast<const char*>(read_iovecs[0].iov_base);
-                size_t len = read_iovecs[0].iov_len;
-                if (read_iovecs.size() > 1) {
-                    len += read_iovecs[1].iov_len;
-                }
-
-                auto parse_result = m_client.m_parser.parse(data, len);
-
-                if (parse_result) {
-                    auto [consumed, value] = parse_result.value();
-                    m_client.m_ring_buffer.consume(consumed);
-                    m_values.push_back(RedisValue(value));
-                } else if (parse_result.error() == protocol::ParseError::Incomplete) {
-                    // 数据不完整，需要继续接收
-                    RedisLogDebug(m_client.m_logger, "parse incomplete, continue receiving");
-                    return std::nullopt;
-                } else {
-                    // 解析错误
-                    RedisLogDebug(m_client.m_logger, "parse error");
-                    reset();
-                    return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_PARSE_ERROR,
-                                                     "Parse error"));
-                }
-            }
-
-            // 所有响应都已接收完成，立刻重置为 Invalid 状态
-            RedisLogDebug(m_client.m_logger, "receive response completed, reset to Invalid state");
-            auto values = std::move(m_values);
+        if (m_internal_error.has_value()) {
+            auto error = std::move(m_internal_error.value());
             reset();  // 清理所有资源
-            return values;
+            return std::unexpected(std::move(error));
         }
-        else {
-            // Invalid 状态，不应该被调用
-            RedisLogError(m_client.m_logger, "await_resume called in Invalid state");
-            reset();
-            return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-                                             "RedisClientAwaitable in Invalid state"));
-        }
+
+        auto values = std::move(m_values);
+        reset();
+        return std::optional<std::vector<RedisValue>>(std::move(values));
     }
 
     // ======================== RedisPipelineAwaitable 实现 ========================
 
-    RedisPipelineAwaitable::RedisPipelineAwaitable(RedisClient& client,
-                                                   std::vector<std::vector<std::string>> commands)
-        : m_client(client)
-        , m_commands(std::move(commands))
-        , m_state(State::Invalid)
-        , m_sent(0)
+    RedisPipelineAwaitable::ProtocolSendAwaitable::ProtocolSendAwaitable(RedisPipelineAwaitable* owner)
+        : SendAwaitable(owner && owner->m_client ? owner->m_client->m_socket.controller() : nullptr,
+                        nullptr, 0)
+        , m_owner(owner)
     {
-        // 预分配响应值的内存
-        m_values.reserve(m_commands.size());
+        rebind(owner);
+    }
 
-        // 编码所有命令
-        for (const auto& cmd_parts : m_commands) {
-            m_encoded_batch += m_client.m_encoder.encodeCommand(cmd_parts);
+    void RedisPipelineAwaitable::ProtocolSendAwaitable::rebind(RedisPipelineAwaitable* owner)
+    {
+        m_owner = owner;
+        m_controller = (m_owner && m_owner->m_client) ? m_owner->m_client->m_socket.controller() : nullptr;
+        if (m_owner) {
+            m_buffer = m_owner->m_encoded_batch.data();
+            m_length = m_owner->m_encoded_batch.size();
+        } else {
+            m_buffer = nullptr;
+            m_length = 0;
         }
     }
 
-    bool RedisPipelineAwaitable::await_suspend(std::coroutine_handle<> handle)
+#ifdef USE_IOURING
+    bool RedisPipelineAwaitable::ProtocolSendAwaitable::handleComplete(struct io_uring_cqe* cqe, GHandle)
     {
-        if (m_state == State::Invalid) {
-            // Invalid 状态，开始发送
-            m_state = State::Sending;
-            m_send_awaitable.emplace(m_client.m_socket.send(
-                m_encoded_batch.c_str() + m_sent,
-                m_encoded_batch.size() - m_sent
-            ));
-            return m_send_awaitable->await_suspend(handle);
+        if (m_length == 0) {
+            return true;
         }
-        else if (m_state == State::Sending) {
-            // 继续发送
-            m_send_awaitable.emplace(m_client.m_socket.send(
-                m_encoded_batch.c_str() + m_sent,
-                m_encoded_batch.size() - m_sent
-            ));
-            return m_send_awaitable->await_suspend(handle);
+        if (cqe == nullptr) {
+            return false;
         }
-        else {
-            // Receiving 状态
-            auto iovecs = m_client.m_ring_buffer.getWriteIovecs();
-            m_recv_awaitable.emplace(m_client.m_socket.readv(std::move(iovecs)));
-            return m_recv_awaitable->await_suspend(handle);
+
+        auto result = galay::kernel::io::handleSend(cqe);
+        if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
+            return false;
         }
+        if (!result) {
+            m_owner->setSendError(result.error());
+            return true;
+        }
+
+        const size_t sent = result.value();
+        if (sent == 0) {
+            return false;
+        }
+
+        m_buffer += sent;
+        m_length -= sent;
+        return m_length == 0;
     }
-
-    std::expected<std::optional<std::vector<RedisValue>>, RedisError>
-    RedisPipelineAwaitable::await_resume()
+#else
+    bool RedisPipelineAwaitable::ProtocolSendAwaitable::handleComplete(GHandle handle)
     {
-        // 首先检查是否有超时错误（由 TimeoutSupport 设置）
-        if (!m_result.has_value()) {
-            // m_result 已被 TimeoutSupport 设置为 IOError，需要转换为 RedisError
-            auto& io_error = m_result.error();
-            RedisLogDebug(m_client.m_logger, "pipeline failed with IO error: {}", io_error.message());
-
-            // 将 IOError 转换为 RedisError
-            RedisErrorType redis_error_type;
-            if (io_error.code() == galay::kernel::kTimeout) {
-                redis_error_type = RedisErrorType::REDIS_ERROR_TYPE_TIMEOUT_ERROR;
-            } else if (io_error.code() == galay::kernel::kDisconnectError) {
-                redis_error_type = RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED;
-            } else {
-                redis_error_type = RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR;
+        while (m_length > 0) {
+            auto result = galay::kernel::io::handleSend(handle, m_buffer, m_length);
+            if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
+                return false;
+            }
+            if (!result) {
+                m_owner->setSendError(result.error());
+                return true;
             }
 
+            const size_t sent = result.value();
+            if (sent == 0) {
+                return false;
+            }
+
+            m_buffer += sent;
+            m_length -= sent;
+        }
+        return true;
+    }
+#endif
+
+    RedisPipelineAwaitable::ProtocolRecvAwaitable::ProtocolRecvAwaitable(RedisPipelineAwaitable* owner)
+        : RecvAwaitable(owner && owner->m_client ? owner->m_client->m_socket.controller() : nullptr,
+                        nullptr, 0)
+        , m_owner(owner)
+    {
+        rebind(owner);
+    }
+
+    void RedisPipelineAwaitable::ProtocolRecvAwaitable::rebind(RedisPipelineAwaitable* owner)
+    {
+        m_owner = owner;
+        m_controller = (m_owner && m_owner->m_client) ? m_owner->m_client->m_socket.controller() : nullptr;
+        m_buffer = nullptr;
+        m_length = 0;
+    }
+
+    bool RedisPipelineAwaitable::ProtocolRecvAwaitable::prepareRecvWindow()
+    {
+        auto write_iovecs = m_owner->m_client->m_ring_buffer.getWriteIovecs();
+        if (write_iovecs.empty()) {
+            return false;
+        }
+
+        m_buffer = static_cast<char*>(write_iovecs[0].iov_base);
+        m_length = write_iovecs[0].iov_len;
+        return m_length > 0;
+    }
+
+#ifdef USE_IOURING
+    bool RedisPipelineAwaitable::ProtocolRecvAwaitable::handleComplete(struct io_uring_cqe* cqe, GHandle)
+    {
+        if (m_owner->parseResponsesFromRingBuffer()) {
+            return true;
+        }
+
+        if (cqe == nullptr) {
+            if (!prepareRecvWindow()) {
+                m_owner->setBufferOverflowError();
+                return true;
+            }
+            return false;
+        }
+
+        auto result = galay::kernel::io::handleRecv(cqe, m_buffer);
+        if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
+            return false;
+        }
+        if (!result) {
+            m_owner->setRecvError(result.error());
+            return true;
+        }
+
+        const size_t recv_bytes = result.value().size();
+        if (recv_bytes == 0) {
+            m_owner->setConnectionClosedError();
+            return true;
+        }
+
+        m_owner->m_client->m_ring_buffer.produce(recv_bytes);
+        if (m_owner->parseResponsesFromRingBuffer()) {
+            return true;
+        }
+
+        if (!prepareRecvWindow()) {
+            m_owner->setBufferOverflowError();
+            return true;
+        }
+        return false;
+    }
+#else
+    bool RedisPipelineAwaitable::ProtocolRecvAwaitable::handleComplete(GHandle handle)
+    {
+        if (m_owner->parseResponsesFromRingBuffer()) {
+            return true;
+        }
+
+        while (true) {
+            if (!prepareRecvWindow()) {
+                m_owner->setBufferOverflowError();
+                return true;
+            }
+
+            auto result = galay::kernel::io::handleRecv(handle, m_buffer, m_length);
+            if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
+                return false;
+            }
+            if (!result) {
+                m_owner->setRecvError(result.error());
+                return true;
+            }
+
+            const size_t recv_bytes = result.value().size();
+            if (recv_bytes == 0) {
+                m_owner->setConnectionClosedError();
+                return true;
+            }
+
+            m_owner->m_client->m_ring_buffer.produce(recv_bytes);
+            if (m_owner->parseResponsesFromRingBuffer()) {
+                return true;
+            }
+        }
+    }
+#endif
+
+    RedisPipelineAwaitable::RedisPipelineAwaitable(RedisClient& client,
+                                                   std::vector<std::vector<std::string>> commands)
+        : CustomAwaitable(client.m_socket.controller())
+        , m_client(&client)
+        , m_commands(std::move(commands))
+        , m_state(State::Running)
+        , m_send_awaitable(this)
+        , m_recv_awaitable(this)
+        , m_result(std::nullopt)
+    {
+        m_values.reserve(m_commands.size());
+        size_t estimated_batch_size = 0;
+        for (const auto& cmd_parts : m_commands) {
+            estimated_batch_size += estimateRespCommandBytes(cmd_parts);
+        }
+        m_encoded_batch.reserve(estimated_batch_size);
+
+        for (const auto& cmd_parts : m_commands) {
+            m_encoded_batch += m_client->m_encoder.encodeCommand(cmd_parts);
+        }
+
+        m_send_awaitable.rebind(this);
+        m_recv_awaitable.rebind(this);
+        initTaskQueue();
+    }
+
+    RedisPipelineAwaitable::RedisPipelineAwaitable(RedisPipelineAwaitable&& other) noexcept
+        : CustomAwaitable(other.m_client ? other.m_client->m_socket.controller() : nullptr)
+        , m_client(nullptr)
+        , m_state(State::Invalid)
+        , m_send_awaitable(this)
+        , m_recv_awaitable(this)
+    {
+        moveFrom(std::move(other));
+    }
+
+    RedisPipelineAwaitable& RedisPipelineAwaitable::operator=(RedisPipelineAwaitable&& other) noexcept
+    {
+        if (this != &other) {
+            moveFrom(std::move(other));
+        }
+        return *this;
+    }
+
+    void RedisPipelineAwaitable::moveFrom(RedisPipelineAwaitable&& other) noexcept
+    {
+        m_controller = other.m_controller;
+        m_waker = std::move(other.m_waker);
+
+        m_client = other.m_client;
+        m_commands = std::move(other.m_commands);
+        m_encoded_batch = std::move(other.m_encoded_batch);
+        m_parse_buffer = std::move(other.m_parse_buffer);
+        m_values = std::move(other.m_values);
+        m_state = other.m_state;
+        m_internal_error = std::move(other.m_internal_error);
+        m_result = std::move(other.m_result);
+
+        m_send_awaitable.rebind(this);
+        m_recv_awaitable.rebind(this);
+        if (m_state == State::Running) {
+            initTaskQueue();
+        } else {
+            m_tasks.clear();
+            m_cursor = 0;
+        }
+
+        other.markMovedFrom();
+    }
+
+    void RedisPipelineAwaitable::markMovedFrom() noexcept
+    {
+        m_state = State::Invalid;
+        m_client = nullptr;
+        m_tasks.clear();
+        m_cursor = 0;
+        m_internal_error.reset();
+        m_values.clear();
+        m_parse_buffer.clear();
+        m_result = std::nullopt;
+        m_send_awaitable.rebind(this);
+        m_recv_awaitable.rebind(this);
+    }
+
+    void RedisPipelineAwaitable::initTaskQueue()
+    {
+        m_tasks.clear();
+        m_cursor = 0;
+        addTask(IOEventType::SEND, &m_send_awaitable);
+        addTask(IOEventType::RECV, &m_recv_awaitable);
+    }
+
+    bool RedisPipelineAwaitable::parseResponsesFromRingBuffer()
+    {
+        while (m_values.size() < m_commands.size()) {
+            auto read_iovecs = m_client->m_ring_buffer.getReadIovecs();
+            if (read_iovecs.empty()) {
+                return false;
+            }
+
+            size_t len = 0;
+            const char* data = prepareParseInput(read_iovecs, m_parse_buffer, len);
+            if (data == nullptr) {
+                return false;
+            }
+
+            auto parse_result = m_client->m_parser.parse(data, len);
+            if (parse_result) {
+                auto [consumed, value] = parse_result.value();
+                m_client->m_ring_buffer.consume(consumed);
+                m_values.push_back(RedisValue(value));
+                continue;
+            }
+
+            if (parse_result.error() == protocol::ParseError::Incomplete) {
+                return false;
+            }
+
+            setParseError();
+            return true;
+        }
+        return true;
+    }
+
+    void RedisPipelineAwaitable::setSendError(const IOError& io_error)
+    {
+        m_internal_error = RedisError(RedisErrorType::REDIS_ERROR_TYPE_SEND_ERROR, io_error.message());
+    }
+
+    void RedisPipelineAwaitable::setRecvError(const IOError& io_error)
+    {
+        if (IOError::contains(io_error.code(), galay::kernel::kDisconnectError)) {
+            setConnectionClosedError();
+            return;
+        }
+        m_internal_error = RedisError(RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR, io_error.message());
+    }
+
+    void RedisPipelineAwaitable::setParseError()
+    {
+        m_internal_error = RedisError(RedisErrorType::REDIS_ERROR_TYPE_PARSE_ERROR, "Parse error");
+    }
+
+    void RedisPipelineAwaitable::setConnectionClosedError()
+    {
+        m_internal_error = RedisError(RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED, "Connection closed");
+    }
+
+    void RedisPipelineAwaitable::setBufferOverflowError()
+    {
+        m_internal_error = RedisError(RedisErrorType::REDIS_ERROR_TYPE_BUFFER_OVERFLOW_ERROR,
+                                      "Ring buffer exhausted before parsing complete pipeline responses");
+    }
+
+    std::expected<std::optional<std::vector<RedisValue>>, RedisError> RedisPipelineAwaitable::await_resume()
+    {
+        onCompleted();
+
+        if (m_state == State::Invalid) {
+            return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
+                                              "RedisPipelineAwaitable in Invalid state"));
+        }
+
+        if (!m_result.has_value()) {
+            auto& io_error = m_result.error();
+            const auto redis_error_type = mapIoErrorToRedisType(
+                io_error, RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR);
+            RedisLogDebug(m_client->m_logger, "pipeline failed with IO error: {}", io_error.message());
             reset();
             return std::unexpected(RedisError(redis_error_type, io_error.message()));
         }
 
-        if (m_state == State::Sending) {
-            auto send_result = m_send_awaitable->await_resume();
-
-            if (!send_result) {
-                RedisLogDebug(m_client.m_logger, "send pipeline failed: {}", send_result.error().message());
-                reset();
-                return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_SEND_ERROR,
-                                                 send_result.error().message()));
-            }
-
-            m_sent += send_result.value();
-
-            if (m_sent < m_encoded_batch.size()) {
-                RedisLogDebug(m_client.m_logger, "send pipeline incomplete, continue sending");
-                return std::nullopt;
-            }
-
-            RedisLogDebug(m_client.m_logger, "send pipeline completed, start receiving responses");
-            m_state = State::Receiving;
-            m_send_awaitable.reset();
-            return std::nullopt;
-        }
-        else if (m_state == State::Receiving) {
-            auto recv_result = m_recv_awaitable->await_resume();
-
-            if (!recv_result) {
-                RedisLogDebug(m_client.m_logger, "receive pipeline responses failed: {}", recv_result.error().message());
-                reset();
-                return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR,
-                                                 recv_result.error().message()));
-            }
-
-            size_t n = recv_result.value();
-            if (n == 0) {
-                RedisLogDebug(m_client.m_logger, "connection closed by peer");
-                reset();
-                return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED,
-                                                 "Connection closed"));
-            }
-
-            m_client.m_ring_buffer.produce(n);
-
-            // 解析所有响应
-            while (m_values.size() < m_commands.size()) {
-                auto read_iovecs = m_client.m_ring_buffer.getReadIovecs();
-                if (read_iovecs.empty()) {
-                    RedisLogDebug(m_client.m_logger, "pipeline responses incomplete, continue receiving");
-                    return std::nullopt;
-                }
-
-                const char* data = static_cast<const char*>(read_iovecs[0].iov_base);
-                size_t len = read_iovecs[0].iov_len;
-                if (read_iovecs.size() > 1) {
-                    len += read_iovecs[1].iov_len;
-                }
-
-                auto parse_result = m_client.m_parser.parse(data, len);
-
-                if (parse_result) {
-                    auto [consumed, value] = parse_result.value();
-                    m_client.m_ring_buffer.consume(consumed);
-                    m_values.push_back(RedisValue(value));
-                } else if (parse_result.error() == protocol::ParseError::Incomplete) {
-                    RedisLogDebug(m_client.m_logger, "parse incomplete, continue receiving");
-                    return std::nullopt;
-                } else {
-                    RedisLogDebug(m_client.m_logger, "parse error");
-                    reset();
-                    return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_PARSE_ERROR,
-                                                     "Parse error"));
-                }
-            }
-
-            RedisLogDebug(m_client.m_logger, "receive pipeline responses completed, reset to Invalid state");
-            auto values = std::move(m_values);
+        if (m_internal_error.has_value()) {
+            auto error = std::move(m_internal_error.value());
             reset();  // 清理所有资源
-            return values;
+            return std::unexpected(std::move(error));
         }
-        else {
-            // Invalid 状态，不应该被调用
-            RedisLogError(m_client.m_logger, "await_resume called in Invalid state");
-            reset();
-            return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-                                             "RedisPipelineAwaitable in Invalid state"));
-        }
+
+        auto values = std::move(m_values);
+        reset();
+        return std::optional<std::vector<RedisValue>>(std::move(values));
     }
 
     // ======================== RedisConnectAwaitable 实现 ========================
@@ -359,8 +824,8 @@ namespace galay::redis
             // 开始连接
             m_state = State::Connecting;
 
-            // 创建 Host 对象并连接
-            Host host(m_version == 4 ? IPType::IPV4 : IPType::IPV6, m_ip, m_port);
+            // version 历史上常被传入 RESP 版本(2/3)，这里只把 6 解释为 IPv6，其余默认 IPv4
+            Host host(m_version == 6 ? IPType::IPV6 : IPType::IPV4, m_ip, m_port);
             m_connect_awaitable.emplace(m_client.m_socket.connect(host));
             return m_connect_awaitable->await_suspend(handle);
         }
@@ -509,10 +974,11 @@ namespace galay::redis
                 return {};  // 继续接收
             }
 
-            const char* data = static_cast<const char*>(read_iovecs[0].iov_base);
-            size_t len = read_iovecs[0].iov_len;
-            if (read_iovecs.size() > 1) {
-                len += read_iovecs[1].iov_len;
+            size_t len = 0;
+            const char* data = prepareParseInput(read_iovecs, m_parse_buffer, len);
+            if (data == nullptr) {
+                RedisLogDebug(m_client.m_logger, "AUTH response parse buffer unavailable");
+                return {};
             }
 
             auto parse_result = m_client.m_parser.parse(data, len);
@@ -606,10 +1072,11 @@ namespace galay::redis
                 return {};  // 继续接收
             }
 
-            const char* data = static_cast<const char*>(read_iovecs[0].iov_base);
-            size_t len = read_iovecs[0].iov_len;
-            if (read_iovecs.size() > 1) {
-                len += read_iovecs[1].iov_len;
+            size_t len = 0;
+            const char* data = prepareParseInput(read_iovecs, m_parse_buffer, len);
+            if (data == nullptr) {
+                RedisLogDebug(m_client.m_logger, "SELECT response parse buffer unavailable");
+                return {};
             }
 
             auto parse_result = m_client.m_parser.parse(data, len);

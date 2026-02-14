@@ -30,7 +30,9 @@ namespace galay::redis
     using galay::kernel::IOError;
     using galay::kernel::IPType;
     using galay::kernel::RingBuffer;
+    using galay::kernel::CustomAwaitable;
     using galay::kernel::SendAwaitable;
+    using galay::kernel::RecvAwaitable;
     using galay::kernel::ReadvAwaitable;
     using galay::kernel::ConnectAwaitable;
 
@@ -54,9 +56,46 @@ namespace galay::redis
      * auto result = co_await client.get("key").timeout(std::chrono::seconds(5));
      * @endcode
      */
-    class RedisClientAwaitable : public galay::kernel::TimeoutSupport<RedisClientAwaitable>
+    class RedisClientAwaitable : public galay::kernel::CustomAwaitable,
+                                 public galay::kernel::TimeoutSupport<RedisClientAwaitable>
     {
     public:
+        class ProtocolSendAwaitable : public SendAwaitable
+        {
+        public:
+            explicit ProtocolSendAwaitable(RedisClientAwaitable* owner);
+
+#ifdef USE_IOURING
+            bool handleComplete(struct io_uring_cqe* cqe, GHandle) override;
+#else
+            bool handleComplete(GHandle handle) override;
+#endif
+
+            void rebind(RedisClientAwaitable* owner);
+
+        private:
+            RedisClientAwaitable* m_owner;
+        };
+
+        class ProtocolRecvAwaitable : public RecvAwaitable
+        {
+        public:
+            explicit ProtocolRecvAwaitable(RedisClientAwaitable* owner);
+
+#ifdef USE_IOURING
+            bool handleComplete(struct io_uring_cqe* cqe, GHandle) override;
+#else
+            bool handleComplete(GHandle handle) override;
+#endif
+
+            void rebind(RedisClientAwaitable* owner);
+
+        private:
+            bool prepareRecvWindow();
+
+            RedisClientAwaitable* m_owner;
+        };
+
         /**
          * @brief 构造函数
          * @param client RedisClient引用
@@ -69,11 +108,16 @@ namespace galay::redis
                             std::vector<std::string> args,
                             size_t expected_replies = 1);
 
+        RedisClientAwaitable(const RedisClientAwaitable&) = delete;
+        RedisClientAwaitable& operator=(const RedisClientAwaitable&) = delete;
+        RedisClientAwaitable(RedisClientAwaitable&& other) noexcept;
+        RedisClientAwaitable& operator=(RedisClientAwaitable&& other) noexcept;
+
         bool await_ready() const noexcept {
             return false;
         }
 
-        bool await_suspend(std::coroutine_handle<> handle);
+        using galay::kernel::CustomAwaitable::await_suspend;
 
         std::expected<std::optional<std::vector<RedisValue>>, RedisError> await_resume();
 
@@ -91,32 +135,41 @@ namespace galay::redis
          */
         void reset() noexcept {
             m_state = State::Invalid;
-            m_send_awaitable.reset();
-            m_recv_awaitable.reset();
+            m_send_awaitable.rebind(this);
+            m_recv_awaitable.rebind(this);
             m_values.clear();
-            m_sent = 0;
+            m_parse_buffer.clear();
+            m_internal_error.reset();
             m_result = std::nullopt;  // 重置为 nullopt
         }
 
     private:
         enum class State {
-            Invalid,           // 无效状态，可以重新创建
-            Sending,           // 正在发送命令
-            Receiving          // 正在接收响应
+            Running,           // 正在执行链式 SEND -> RECV
+            Invalid            // 无效状态，可以重新创建
         };
 
-        RedisClient& m_client;
+        void initTaskQueue();
+        void moveFrom(RedisClientAwaitable&& other) noexcept;
+        void markMovedFrom() noexcept;
+        bool parseResponsesFromRingBuffer();
+        void setSendError(const IOError& io_error);
+        void setRecvError(const IOError& io_error);
+        void setParseError();
+        void setConnectionClosedError();
+        void setBufferOverflowError();
+
+        RedisClient* m_client;
         std::string m_cmd;
         std::vector<std::string> m_args;
         std::string m_encoded_cmd;
+        std::string m_parse_buffer;
         size_t m_expected_replies;
         std::vector<RedisValue> m_values;
         State m_state;
-        size_t m_sent;
-
-        // 持有底层的 awaitable 对象
-        std::optional<SendAwaitable> m_send_awaitable;
-        std::optional<ReadvAwaitable> m_recv_awaitable;
+        ProtocolSendAwaitable m_send_awaitable;
+        ProtocolRecvAwaitable m_recv_awaitable;
+        std::optional<RedisError> m_internal_error;
 
     public:
         // TimeoutSupport 需要访问此成员来设置超时错误
@@ -133,17 +186,59 @@ namespace galay::redis
      * auto result = co_await client.pipeline(commands).timeout(std::chrono::seconds(10));
      * @endcode
      */
-    class RedisPipelineAwaitable : public galay::kernel::TimeoutSupport<RedisPipelineAwaitable>
+    class RedisPipelineAwaitable : public galay::kernel::CustomAwaitable,
+                                   public galay::kernel::TimeoutSupport<RedisPipelineAwaitable>
     {
     public:
+        class ProtocolSendAwaitable : public SendAwaitable
+        {
+        public:
+            explicit ProtocolSendAwaitable(RedisPipelineAwaitable* owner);
+
+#ifdef USE_IOURING
+            bool handleComplete(struct io_uring_cqe* cqe, GHandle) override;
+#else
+            bool handleComplete(GHandle handle) override;
+#endif
+
+            void rebind(RedisPipelineAwaitable* owner);
+
+        private:
+            RedisPipelineAwaitable* m_owner;
+        };
+
+        class ProtocolRecvAwaitable : public RecvAwaitable
+        {
+        public:
+            explicit ProtocolRecvAwaitable(RedisPipelineAwaitable* owner);
+
+#ifdef USE_IOURING
+            bool handleComplete(struct io_uring_cqe* cqe, GHandle) override;
+#else
+            bool handleComplete(GHandle handle) override;
+#endif
+
+            void rebind(RedisPipelineAwaitable* owner);
+
+        private:
+            bool prepareRecvWindow();
+
+            RedisPipelineAwaitable* m_owner;
+        };
+
         RedisPipelineAwaitable(RedisClient& client,
                               std::vector<std::vector<std::string>> commands);
+
+        RedisPipelineAwaitable(const RedisPipelineAwaitable&) = delete;
+        RedisPipelineAwaitable& operator=(const RedisPipelineAwaitable&) = delete;
+        RedisPipelineAwaitable(RedisPipelineAwaitable&& other) noexcept;
+        RedisPipelineAwaitable& operator=(RedisPipelineAwaitable&& other) noexcept;
 
         bool await_ready() const noexcept {
             return false;
         }
 
-        bool await_suspend(std::coroutine_handle<> handle);
+        using galay::kernel::CustomAwaitable::await_suspend;
 
         std::expected<std::optional<std::vector<RedisValue>>, RedisError> await_resume();
 
@@ -157,29 +252,39 @@ namespace galay::redis
          */
         void reset() noexcept {
             m_state = State::Invalid;
-            m_send_awaitable.reset();
-            m_recv_awaitable.reset();
+            m_send_awaitable.rebind(this);
+            m_recv_awaitable.rebind(this);
             m_values.clear();
-            m_sent = 0;
+            m_parse_buffer.clear();
+            m_internal_error.reset();
             m_result = std::nullopt;
         }
 
     private:
         enum class State {
-            Invalid,
-            Sending,
-            Receiving
+            Running,
+            Invalid
         };
 
-        RedisClient& m_client;
+        void initTaskQueue();
+        void moveFrom(RedisPipelineAwaitable&& other) noexcept;
+        void markMovedFrom() noexcept;
+        bool parseResponsesFromRingBuffer();
+        void setSendError(const IOError& io_error);
+        void setRecvError(const IOError& io_error);
+        void setParseError();
+        void setConnectionClosedError();
+        void setBufferOverflowError();
+
+        RedisClient* m_client;
         std::vector<std::vector<std::string>> m_commands;
         std::string m_encoded_batch;
+        std::string m_parse_buffer;
         std::vector<RedisValue> m_values;
         State m_state;
-        size_t m_sent;
-
-        std::optional<SendAwaitable> m_send_awaitable;
-        std::optional<ReadvAwaitable> m_recv_awaitable;
+        ProtocolSendAwaitable m_send_awaitable;
+        ProtocolRecvAwaitable m_recv_awaitable;
+        std::optional<RedisError> m_internal_error;
 
     public:
         // TimeoutSupport 需要访问此成员来设置超时错误
@@ -236,6 +341,7 @@ namespace galay::redis
         std::optional<ReadvAwaitable> m_recv_awaitable;
         std::vector<RedisValue> m_temp_values;
         std::string m_encoded_cmd;
+        std::string m_parse_buffer;
         size_t m_sent;
     };
 

@@ -344,6 +344,24 @@ public:
 - **Pipeline模式**: 50,000-200,000 ops/sec
 - **超时开销**: < 1% 性能影响
 
+最新本地实测（2026-02-14，`127.0.0.1:6379`，已修复基准程序固定等待30秒的统计问题）：
+
+- `./build/test/test_redis_client_benchmark 10 100`
+  - Total time: 75ms
+  - Successful: 2000
+  - Ops/sec: 26666
+  - Success rate: 100%
+- `./build/test/test_redis_client_benchmark 50 500`
+  - Total time: 445ms
+  - Successful: 50000
+  - Ops/sec: 112359
+  - Success rate: 100%
+- `./build/test/test_redis_client_benchmark 20 5000 pipeline 100`
+  - Total time: 91ms
+  - Successful: 100000
+  - Ops/sec: 1098901
+  - Success rate: 100%
+
 ## 并发使用
 
 ### 多客户端并发

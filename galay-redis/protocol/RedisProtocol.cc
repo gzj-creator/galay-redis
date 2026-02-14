@@ -478,7 +478,10 @@ namespace galay::redis::protocol
 
     std::string RespEncoder::encodeBulkString(const std::string& str)
     {
-        return "$" + std::to_string(str.length()) + "\r\n" + str + "\r\n";
+        std::string result;
+        result.reserve(estimateBulkStringBytes(str.size()));
+        appendBulkString(result, str);
+        return result;
     }
 
     std::string RespEncoder::encodeNull()
@@ -488,9 +491,18 @@ namespace galay::redis::protocol
 
     std::string RespEncoder::encodeArray(const std::vector<std::string>& elements)
     {
-        std::string result = "*" + std::to_string(elements.size()) + "\r\n";
+        size_t estimated = 1 + decimalDigits(elements.size()) + 2;
         for (const auto& elem : elements) {
-            result += encodeBulkString(elem);
+            estimated += estimateBulkStringBytes(elem.size());
+        }
+
+        std::string result;
+        result.reserve(estimated);
+        result.push_back('*');
+        result += std::to_string(elements.size());
+        result += "\r\n";
+        for (const auto& elem : elements) {
+            appendBulkString(result, elem);
         }
         return result;
     }
@@ -501,19 +513,38 @@ namespace galay::redis::protocol
             return "*0\r\n";
         }
 
-        std::string result = "*" + std::to_string(cmd_parts.size()) + "\r\n";
+        size_t estimated = 1 + decimalDigits(cmd_parts.size()) + 2;
         for (const auto& part : cmd_parts) {
-            result += encodeBulkString(part);
+            estimated += estimateBulkStringBytes(part.size());
+        }
+
+        std::string result;
+        result.reserve(estimated);
+        result.push_back('*');
+        result += std::to_string(cmd_parts.size());
+        result += "\r\n";
+        for (const auto& part : cmd_parts) {
+            appendBulkString(result, part);
         }
         return result;
     }
 
     std::string RespEncoder::encodeCommand(const std::string& cmd, std::initializer_list<std::string> args)
     {
-        std::string result = "*" + std::to_string(1 + args.size()) + "\r\n";
-        result += encodeBulkString(cmd);
+        const size_t arg_count = 1 + args.size();
+        size_t estimated = 1 + decimalDigits(arg_count) + 2 + estimateBulkStringBytes(cmd.size());
         for (const auto& arg : args) {
-            result += encodeBulkString(arg);
+            estimated += estimateBulkStringBytes(arg.size());
+        }
+
+        std::string result;
+        result.reserve(estimated);
+        result.push_back('*');
+        result += std::to_string(arg_count);
+        result += "\r\n";
+        appendBulkString(result, cmd);
+        for (const auto& arg : args) {
+            appendBulkString(result, arg);
         }
         return result;
     }

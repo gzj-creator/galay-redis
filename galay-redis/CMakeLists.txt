@@ -23,7 +23,6 @@ target_link_libraries(${PROJECT_NAME}
     PUBLIC galay::galay-utils
     PUBLIC OpenSSL::SSL    # 使用OpenSSL目标
     PUBLIC OpenSSL::Crypto # 使用OpenSSL目标
-    PUBLIC pthread
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${OPENSSL_INCLUDE_DIR})

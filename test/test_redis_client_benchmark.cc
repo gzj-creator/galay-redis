@@ -4,6 +4,9 @@
 #include <chrono>
 #include <atomic>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 using namespace galay::redis;
 using namespace galay::kernel;
@@ -12,11 +15,20 @@ using namespace galay::kernel;
 std::atomic<int> success_count{0};
 std::atomic<int> error_count{0};
 std::atomic<int> timeout_count{0};
+std::atomic<int> completed_clients{0};
+std::mutex completed_mutex;
+std::condition_variable completed_cv;
+
+void markClientCompleted()
+{
+    completed_clients.fetch_add(1, std::memory_order_relaxed);
+    completed_cv.notify_one();
+}
 
 /**
  * @brief 单个客户端的性能测试
  */
-Coroutine benchmarkClient(IOScheduler* scheduler, int client_id, int operations_per_client)
+Coroutine benchmarkClient(IOScheduler* scheduler, int client_id, int operations_per_client, bool verbose)
 {
     RedisClient client(scheduler);
 
@@ -25,13 +37,19 @@ Coroutine benchmarkClient(IOScheduler* scheduler, int client_id, int operations_
     if (!connect_result) {
         std::cerr << "Client " << client_id << " failed to connect: "
                   << connect_result.error().message() << std::endl;
-        error_count += operations_per_client;
+        error_count.fetch_add(operations_per_client * 2, std::memory_order_relaxed);
+        markClientCompleted();
         co_return;
     }
 
-    std::cout << "Client " << client_id << " connected" << std::endl;
+    if (verbose) {
+        std::cout << "Client " << client_id << " connected" << std::endl;
+    }
 
     auto start_time = std::chrono::high_resolution_clock::now();
+    int local_success = 0;
+    int local_error = 0;
+    int local_timeout = 0;
 
     // 执行操作
     for (int i = 0; i < operations_per_client; ++i) {
@@ -41,24 +59,24 @@ Coroutine benchmarkClient(IOScheduler* scheduler, int client_id, int operations_
         // SET操作
         auto set_result = co_await client.set(key, value).timeout(std::chrono::seconds(5));
         if (set_result && set_result.value()) {
-            success_count++;
+            ++local_success;
         } else if (!set_result) {
             if (set_result.error().type() == REDIS_ERROR_TYPE_TIMEOUT_ERROR) {
-                timeout_count++;
+                ++local_timeout;
             } else {
-                error_count++;
+                ++local_error;
             }
         }
 
         // GET操作
         auto get_result = co_await client.get(key).timeout(std::chrono::seconds(5));
         if (get_result && get_result.value()) {
-            success_count++;
+            ++local_success;
         } else if (!get_result) {
             if (get_result.error().type() == REDIS_ERROR_TYPE_TIMEOUT_ERROR) {
-                timeout_count++;
+                ++local_timeout;
             } else {
-                error_count++;
+                ++local_error;
             }
         }
     }
@@ -66,32 +84,46 @@ Coroutine benchmarkClient(IOScheduler* scheduler, int client_id, int operations_
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
-    std::cout << "Client " << client_id << " completed " << (operations_per_client * 2)
-              << " operations in " << duration.count() << "ms" << std::endl;
+    success_count.fetch_add(local_success, std::memory_order_relaxed);
+    error_count.fetch_add(local_error, std::memory_order_relaxed);
+    timeout_count.fetch_add(local_timeout, std::memory_order_relaxed);
+
+    if (verbose) {
+        std::cout << "Client " << client_id << " completed " << (operations_per_client * 2)
+                  << " operations in " << duration.count() << "ms" << std::endl;
+    }
 
     co_await client.close();
+    markClientCompleted();
 }
 
 /**
  * @brief Pipeline性能测试
  */
-Coroutine benchmarkPipeline(IOScheduler* scheduler, int client_id, int batch_size, int batches)
+Coroutine benchmarkPipeline(IOScheduler* scheduler, int client_id, int batch_size, int batches, bool verbose)
 {
     RedisClient client(scheduler);
 
     auto connect_result = co_await client.connect("127.0.0.1", 6379);
     if (!connect_result) {
         std::cerr << "Pipeline client " << client_id << " failed to connect" << std::endl;
-        error_count += batch_size * batches;
+        error_count.fetch_add(batch_size * batches, std::memory_order_relaxed);
+        markClientCompleted();
         co_return;
     }
 
-    std::cout << "Pipeline client " << client_id << " connected" << std::endl;
+    if (verbose) {
+        std::cout << "Pipeline client " << client_id << " connected" << std::endl;
+    }
 
     auto start_time = std::chrono::high_resolution_clock::now();
+    int local_success = 0;
+    int local_error = 0;
+    int local_timeout = 0;
 
     for (int batch = 0; batch < batches; ++batch) {
         std::vector<std::vector<std::string>> commands;
+        commands.reserve(batch_size);
 
         // 构建批量命令
         for (int i = 0; i < batch_size; ++i) {
@@ -103,12 +135,12 @@ Coroutine benchmarkPipeline(IOScheduler* scheduler, int client_id, int batch_siz
         // 执行Pipeline
         auto result = co_await client.pipeline(commands);
         if (result && result.value()) {
-            success_count += batch_size;
+            local_success += batch_size;
         } else if (!result) {
             if (result.error().type() == REDIS_ERROR_TYPE_TIMEOUT_ERROR) {
-                timeout_count += batch_size;
+                local_timeout += batch_size;
             } else {
-                error_count += batch_size;
+                local_error += batch_size;
             }
         }
     }
@@ -116,10 +148,17 @@ Coroutine benchmarkPipeline(IOScheduler* scheduler, int client_id, int batch_siz
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
-    std::cout << "Pipeline client " << client_id << " completed " << (batch_size * batches)
-              << " operations in " << duration.count() << "ms" << std::endl;
+    success_count.fetch_add(local_success, std::memory_order_relaxed);
+    error_count.fetch_add(local_error, std::memory_order_relaxed);
+    timeout_count.fetch_add(local_timeout, std::memory_order_relaxed);
+
+    if (verbose) {
+        std::cout << "Pipeline client " << client_id << " completed " << (batch_size * batches)
+                  << " operations in " << duration.count() << "ms" << std::endl;
+    }
 
     co_await client.close();
+    markClientCompleted();
 }
 
 int main(int argc, char* argv[])
@@ -129,12 +168,17 @@ int main(int argc, char* argv[])
     int operations_per_client = 100;
     bool use_pipeline = false;
     int batch_size = 10;
+    bool verbose = true;
 
     // 解析命令行参数
     if (argc > 1) num_clients = std::atoi(argv[1]);
     if (argc > 2) operations_per_client = std::atoi(argv[2]);
     if (argc > 3) use_pipeline = (std::string(argv[3]) == "pipeline");
     if (argc > 4) batch_size = std::atoi(argv[4]);
+    if (argc > 5) verbose = (std::string(argv[5]) != "quiet");
+    if (num_clients >= 50 && argc <= 5) {
+        verbose = false;
+    }
 
     std::cout << "==================================================" << std::endl;
     std::cout << "Redis Client Performance Benchmark" << std::endl;
@@ -145,33 +189,53 @@ int main(int argc, char* argv[])
     if (use_pipeline) {
         std::cout << "Batch size: " << batch_size << std::endl;
     }
-    std::cout << "Total operations: " << (num_clients * operations_per_client * (use_pipeline ? 1 : 2)) << std::endl;
+    int pipeline_batches = use_pipeline ? (operations_per_client / batch_size) : 0;
+    int pipeline_remainder = use_pipeline ? (operations_per_client % batch_size) : 0;
+    if (use_pipeline && pipeline_remainder != 0) {
+        std::cout << "Warning: operations_per_client is not divisible by batch_size, "
+                  << pipeline_remainder << " ops/client are ignored in this run" << std::endl;
+    }
+    int effective_ops_per_client = use_pipeline ? (pipeline_batches * batch_size) : (operations_per_client * 2);
+    std::cout << "Total operations: " << (num_clients * effective_ops_per_client) << std::endl;
     std::cout << "==================================================" << std::endl;
 
     try {
         Runtime runtime;
         runtime.start();
 
-        auto* scheduler = runtime.getNextIOScheduler();
-        if (!scheduler) {
-            std::cerr << "Failed to get IO scheduler" << std::endl;
-            return 1;
-        }
+        success_count.store(0);
+        error_count.store(0);
+        timeout_count.store(0);
+        completed_clients.store(0);
 
         auto start_time = std::chrono::high_resolution_clock::now();
 
         // 启动所有客户端
         for (int i = 0; i < num_clients; ++i) {
+            auto* scheduler = runtime.getNextIOScheduler();
+            if (!scheduler) {
+                std::cerr << "Failed to get IO scheduler for client " << i << std::endl;
+                runtime.stop();
+                return 1;
+            }
             if (use_pipeline) {
-                int batches = operations_per_client / batch_size;
-                scheduler->spawn(benchmarkPipeline(scheduler, i, batch_size, batches));
+                scheduler->spawn(benchmarkPipeline(scheduler, i, batch_size, pipeline_batches, verbose));
             } else {
-                scheduler->spawn(benchmarkClient(scheduler, i, operations_per_client));
+                scheduler->spawn(benchmarkClient(scheduler, i, operations_per_client, verbose));
             }
         }
 
-        // 等待所有操作完成
-        std::this_thread::sleep_for(std::chrono::seconds(30));
+        // 等待所有客户端完成，而非固定 sleep 30s
+        constexpr auto kMaxWait = std::chrono::seconds(120);
+        std::unique_lock<std::mutex> lock(completed_mutex);
+        const bool finished = completed_cv.wait_for(lock, kMaxWait, [&]() {
+            return completed_clients.load(std::memory_order_relaxed) >= num_clients;
+        });
+        if (!finished) {
+            std::cerr << "Benchmark wait timeout after 120s, completed clients: "
+                      << completed_clients.load(std::memory_order_relaxed)
+                      << "/" << num_clients << std::endl;
+        }
 
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);

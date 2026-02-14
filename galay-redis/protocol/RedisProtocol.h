@@ -8,6 +8,7 @@
 #include <optional>
 #include <expected>
 #include <cstdint>
+#include <string_view>
 
 namespace galay::redis::protocol
 {
@@ -195,6 +196,55 @@ namespace galay::redis::protocol
         std::string encodeCommand(std::initializer_list<std::string> cmd_parts);
 
     private:
+        static size_t decimalDigits(size_t value)
+        {
+            size_t digits = 1;
+            while (value >= 10) {
+                value /= 10;
+                ++digits;
+            }
+            return digits;
+        }
+
+        static size_t estimateBulkStringBytes(size_t value_len)
+        {
+            return 1 + decimalDigits(value_len) + 2 + value_len + 2;
+        }
+
+        static void appendBulkString(std::string& out, std::string_view value)
+        {
+            out.push_back('$');
+            out += std::to_string(value.size());
+            out += "\r\n";
+            out.append(value.data(), value.size());
+            out += "\r\n";
+        }
+
+        template<typename T>
+        static void appendCommandPart(std::string& out, T&& value)
+        {
+            using Decayed = std::decay_t<T>;
+            if constexpr (std::is_same_v<Decayed, std::string>) {
+                appendBulkString(out, value);
+            } else if constexpr (std::is_same_v<Decayed, std::string_view>) {
+                appendBulkString(out, value);
+            } else if constexpr (std::is_same_v<Decayed, const char*> ||
+                                 std::is_same_v<Decayed, char*>) {
+                appendBulkString(out, value ? std::string_view(value) : std::string_view{});
+            } else if constexpr (std::is_integral_v<Decayed>) {
+                auto str = std::to_string(value);
+                appendBulkString(out, str);
+            } else if constexpr (std::is_floating_point_v<Decayed>) {
+                auto str = std::to_string(value);
+                appendBulkString(out, str);
+            } else if constexpr (std::is_convertible_v<T, std::string_view>) {
+                appendBulkString(out, std::string_view(value));
+            } else {
+                auto str = std::string(value);
+                appendBulkString(out, str);
+            }
+        }
+
         // 辅助函数：将参数转换为字符串
         template<typename T>
         std::string toString(T&& value);
@@ -229,7 +279,7 @@ namespace galay::redis::protocol
     template<typename T, typename... Rest>
     void RespEncoder::buildCommandArgs(std::string& result, T&& first, Rest&&... rest)
     {
-        result += encodeBulkString(toString(std::forward<T>(first)));
+        appendCommandPart(result, std::forward<T>(first));
         if constexpr (sizeof...(rest) > 0) {
             buildCommandArgs(result, std::forward<Rest>(rest)...);
         }
@@ -238,8 +288,13 @@ namespace galay::redis::protocol
     template<typename... Args>
     std::string RespEncoder::encodeCommand(const std::string& cmd, Args&&... args)
     {
-        std::string result = "*" + std::to_string(1 + sizeof...(args)) + "\r\n";
-        result += encodeBulkString(cmd);
+        const size_t arg_count = 1 + sizeof...(args);
+        std::string result;
+        result.reserve(1 + decimalDigits(arg_count) + 2 + estimateBulkStringBytes(cmd.size()));
+        result.push_back('*');
+        result += std::to_string(arg_count);
+        result += "\r\n";
+        appendBulkString(result, cmd);
         if constexpr (sizeof...(args) > 0) {
             buildCommandArgs(result, std::forward<Args>(args)...);
         }
@@ -260,9 +315,13 @@ namespace galay::redis::protocol
             return "*0\r\n";
         }
 
-        std::string result = "*" + std::to_string(size) + "\r\n";
+        std::string result;
+        result.reserve(1 + decimalDigits(size) + 2 + size * 8);
+        result.push_back('*');
+        result += std::to_string(size);
+        result += "\r\n";
         for (const auto& part : cmd_parts) {
-            result += encodeBulkString(toString(part));
+            appendCommandPart(result, part);
         }
         return result;
     }
