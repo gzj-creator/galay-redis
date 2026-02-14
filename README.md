@@ -26,15 +26,15 @@
 
 - C++20 编译器（GCC 11+ / Clang 14+）
 - CMake 3.20+
-- [galay-kernel](https://github.com/galay/galay-kernel) — 协程运行时
-- [galay-utils](https://github.com/galay/galay-utils) — 工具库
+- [galay-kernel](https://github.com/gzj-creator/galay-kernel) — 协程运行时
+- [galay-utils](https://github.com/gzj-creator/galay-utils) — 工具库
 - spdlog
 - OpenSSL
 
 ## 编译安装
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/gzj-creator/galay-redis.git
 cd galay-redis
 mkdir build && cd build
 cmake ..
