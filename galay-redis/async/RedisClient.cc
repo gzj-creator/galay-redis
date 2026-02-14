@@ -251,22 +251,26 @@ namespace galay::redis
     RedisClientAwaitable::RedisClientAwaitable(RedisClient& client,
                                                std::string cmd,
                                                std::vector<std::string> args,
-                                               size_t expected_replies)
+                                               size_t expected_replies,
+                                               bool recv_only)
         : CustomAwaitable(client.m_socket.controller())
         , m_client(&client)
         , m_cmd(std::move(cmd))
         , m_args(std::move(args))
         , m_expected_replies(expected_replies)
+        , m_recv_only(recv_only)
         , m_state(State::Running)
         , m_send_awaitable(this)
         , m_recv_awaitable(this)
         , m_result(std::nullopt)
     {
-        std::vector<std::string> cmd_parts;
-        cmd_parts.reserve(1 + m_args.size());
-        cmd_parts.push_back(m_cmd);
-        cmd_parts.insert(cmd_parts.end(), m_args.begin(), m_args.end());
-        m_encoded_cmd = m_client->m_encoder.encodeCommand(cmd_parts);
+        if (!m_recv_only) {
+            std::vector<std::string> cmd_parts;
+            cmd_parts.reserve(1 + m_args.size());
+            cmd_parts.push_back(m_cmd);
+            cmd_parts.insert(cmd_parts.end(), m_args.begin(), m_args.end());
+            m_encoded_cmd = m_client->m_encoder.encodeCommand(cmd_parts);
+        }
 
         m_values.reserve(m_expected_replies);
         m_send_awaitable.rebind(this);
@@ -278,6 +282,7 @@ namespace galay::redis
         : CustomAwaitable(other.m_client ? other.m_client->m_socket.controller() : nullptr)
         , m_client(nullptr)
         , m_expected_replies(0)
+        , m_recv_only(false)
         , m_state(State::Invalid)
         , m_send_awaitable(this)
         , m_recv_awaitable(this)
@@ -304,6 +309,7 @@ namespace galay::redis
         m_encoded_cmd = std::move(other.m_encoded_cmd);
         m_parse_buffer = std::move(other.m_parse_buffer);
         m_expected_replies = other.m_expected_replies;
+        m_recv_only = other.m_recv_only;
         m_values = std::move(other.m_values);
         m_state = other.m_state;
         m_internal_error = std::move(other.m_internal_error);
@@ -330,6 +336,7 @@ namespace galay::redis
         m_internal_error.reset();
         m_values.clear();
         m_parse_buffer.clear();
+        m_recv_only = false;
         m_result = std::nullopt;
         m_send_awaitable.rebind(this);
         m_recv_awaitable.rebind(this);
@@ -339,7 +346,9 @@ namespace galay::redis
     {
         m_tasks.clear();
         m_cursor = 0;
-        addTask(IOEventType::SEND, &m_send_awaitable);
+        if (!m_recv_only) {
+            addTask(IOEventType::SEND, &m_send_awaitable);
+        }
         addTask(IOEventType::RECV, &m_recv_awaitable);
     }
 
@@ -1194,9 +1203,24 @@ namespace galay::redis
 
     RedisClientAwaitable& RedisClient::execute(const std::string& cmd, const std::vector<std::string>& args)
     {
+        return execute(cmd, args, 1);
+    }
+
+    RedisClientAwaitable& RedisClient::execute(const std::string& cmd,
+                                               const std::vector<std::string>& args,
+                                               size_t expected_replies)
+    {
         // 只有当 awaitable 不存在或状态为 Invalid 时，才创建新的
         if (!m_cmd_awaitable.has_value() || m_cmd_awaitable->isInvalid()) {
-            m_cmd_awaitable.emplace(*this, cmd, args, 1);
+            m_cmd_awaitable.emplace(*this, cmd, args, expected_replies, false);
+        }
+        return *m_cmd_awaitable;
+    }
+
+    RedisClientAwaitable& RedisClient::receive(size_t expected_replies)
+    {
+        if (!m_cmd_awaitable.has_value() || m_cmd_awaitable->isInvalid()) {
+            m_cmd_awaitable.emplace(*this, "", std::vector<std::string>{}, expected_replies, true);
         }
         return *m_cmd_awaitable;
     }
@@ -1219,6 +1243,98 @@ namespace galay::redis
 
     RedisClientAwaitable& RedisClient::echo(const std::string& message) {
         return execute("ECHO", {message});
+    }
+
+    RedisClientAwaitable& RedisClient::publish(const std::string& channel, const std::string& message)
+    {
+        return execute("PUBLISH", {channel, message});
+    }
+
+    RedisClientAwaitable& RedisClient::subscribe(const std::string& channel)
+    {
+        return execute("SUBSCRIBE", {channel}, 1);
+    }
+
+    RedisClientAwaitable& RedisClient::subscribe(const std::vector<std::string>& channels)
+    {
+        if (channels.empty()) {
+            return execute("SUBSCRIBE", {}, 1);
+        }
+        return execute("SUBSCRIBE", channels, channels.size());
+    }
+
+    RedisClientAwaitable& RedisClient::unsubscribe(const std::string& channel)
+    {
+        return execute("UNSUBSCRIBE", {channel}, 1);
+    }
+
+    RedisClientAwaitable& RedisClient::unsubscribe(const std::vector<std::string>& channels)
+    {
+        if (channels.empty()) {
+            return execute("UNSUBSCRIBE", {}, 1);
+        }
+        return execute("UNSUBSCRIBE", channels, channels.size());
+    }
+
+    RedisClientAwaitable& RedisClient::psubscribe(const std::string& pattern)
+    {
+        return execute("PSUBSCRIBE", {pattern}, 1);
+    }
+
+    RedisClientAwaitable& RedisClient::psubscribe(const std::vector<std::string>& patterns)
+    {
+        if (patterns.empty()) {
+            return execute("PSUBSCRIBE", {}, 1);
+        }
+        return execute("PSUBSCRIBE", patterns, patterns.size());
+    }
+
+    RedisClientAwaitable& RedisClient::punsubscribe(const std::string& pattern)
+    {
+        return execute("PUNSUBSCRIBE", {pattern}, 1);
+    }
+
+    RedisClientAwaitable& RedisClient::punsubscribe(const std::vector<std::string>& patterns)
+    {
+        if (patterns.empty()) {
+            return execute("PUNSUBSCRIBE", {}, 1);
+        }
+        return execute("PUNSUBSCRIBE", patterns, patterns.size());
+    }
+
+    RedisClientAwaitable& RedisClient::role()
+    {
+        return execute("ROLE", {});
+    }
+
+    RedisClientAwaitable& RedisClient::replicaof(const std::string& host, int32_t port)
+    {
+        return execute("REPLICAOF", {host, std::to_string(port)});
+    }
+
+    RedisClientAwaitable& RedisClient::readonly()
+    {
+        return execute("READONLY", {});
+    }
+
+    RedisClientAwaitable& RedisClient::readwrite()
+    {
+        return execute("READWRITE", {});
+    }
+
+    RedisClientAwaitable& RedisClient::clusterInfo()
+    {
+        return execute("CLUSTER", {"INFO"});
+    }
+
+    RedisClientAwaitable& RedisClient::clusterNodes()
+    {
+        return execute("CLUSTER", {"NODES"});
+    }
+
+    RedisClientAwaitable& RedisClient::clusterSlots()
+    {
+        return execute("CLUSTER", {"SLOTS"});
     }
 
     RedisClientAwaitable& RedisClient::get(const std::string& key) {

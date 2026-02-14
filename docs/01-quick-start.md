@@ -321,6 +321,96 @@ public:
 };
 ```
 
+## 拓展能力
+
+### 发布订阅（Pub/Sub）
+
+```cpp
+RedisClient sub(scheduler);
+RedisClient pub(scheduler);
+
+co_await sub.connect("127.0.0.1", 6379);
+co_await pub.connect("127.0.0.1", 6379);
+
+// 订阅确认（返回 subscribe ack）
+co_await sub.subscribe("news");
+
+// 发布消息
+co_await pub.publish("news", "hello");
+
+// 拉取订阅消息（message/pmessage）
+auto msg = co_await sub.receive();
+```
+
+### 主从读写分离
+
+```cpp
+#include "async/RedisTopologyClient.h"
+
+RedisMasterSlaveClient ms(scheduler);
+RedisNodeAddress node{"127.0.0.1", 6379};
+
+co_await ms.connectMaster(node);
+co_await ms.addReplica(node); // 示例里复用同一个节点
+
+co_await ms.executeWrite("SET", {"k", "v"});
+auto read = co_await ms.executeRead("GET", {"k"});
+```
+
+### 集群按 Key 路由
+
+```cpp
+RedisClusterClient cluster(scheduler);
+
+RedisClusterNodeAddress n1;
+n1.host = "127.0.0.1";
+n1.port = 6379;
+n1.slot_start = 0;
+n1.slot_end = 8191;
+
+RedisClusterNodeAddress n2;
+n2.host = "127.0.0.1";
+n2.port = 6379;
+n2.slot_start = 8192;
+n2.slot_end = 16383;
+
+co_await cluster.addNode(n1);
+co_await cluster.addNode(n2);
+
+co_await cluster.executeByKey("{u100}:name", "SET", {"{u100}:name", "alice"});
+auto v = co_await cluster.executeByKey("{u100}:name", "GET", {"{u100}:name"});
+```
+
+### 自动 MOVED/ASK 重定向 + CLUSTER SLOTS 自动刷新
+
+```cpp
+RedisClusterClient cluster(scheduler);
+cluster.setAutoRefreshInterval(std::chrono::seconds(5));
+
+// 自动模式：遇到 MOVED/ASK 会自动重定向，并在需要时刷新 slots
+auto set_result = co_await cluster.executeByKeyAuto("{u300}:name", "SET", {"{u300}:name", "bob"});
+auto get_result = co_await cluster.executeByKeyAuto("{u300}:name", "GET", {"{u300}:name"});
+```
+
+### Sentinel 自动故障转移
+
+```cpp
+RedisMasterSlaveClient ms(scheduler);
+ms.setSentinelMasterName("mymaster");
+
+RedisNodeAddress sentinel;
+sentinel.host = "127.0.0.1";
+sentinel.port = 26379;
+co_await ms.addSentinel(sentinel);
+
+// 主从拓扑由 Sentinel 自动刷新
+auto refresh = co_await ms.refreshFromSentinel();
+
+// 自动写入：主库不可用时会触发 Sentinel 刷新并重试
+auto write = co_await ms.executeWriteAuto("SET", {"k", "v"});
+auto read = co_await ms.executeReadAuto("GET", {"k"});
+```
+
 ## 性能测试
 
 ### 运行基准测试

@@ -106,7 +106,8 @@ namespace galay::redis
         RedisClientAwaitable(RedisClient& client,
                             std::string cmd,
                             std::vector<std::string> args,
-                            size_t expected_replies = 1);
+                            size_t expected_replies = 1,
+                            bool recv_only = false);
 
         RedisClientAwaitable(const RedisClientAwaitable&) = delete;
         RedisClientAwaitable& operator=(const RedisClientAwaitable&) = delete;
@@ -165,6 +166,7 @@ namespace galay::redis
         std::string m_encoded_cmd;
         std::string m_parse_buffer;
         size_t m_expected_replies;
+        bool m_recv_only;
         std::vector<RedisValue> m_values;
         State m_state;
         ProtocolSendAwaitable m_send_awaitable;
@@ -394,11 +396,37 @@ namespace galay::redis
         // ======================== 基础Redis命令 ========================
 
         RedisClientAwaitable& execute(const std::string& cmd, const std::vector<std::string>& args);
+        RedisClientAwaitable& execute(const std::string& cmd,
+                                      const std::vector<std::string>& args,
+                                      size_t expected_replies);
+        RedisClientAwaitable& receive(size_t expected_replies = 1);
         RedisClientAwaitable& auth(const std::string& password);
         RedisClientAwaitable& auth(const std::string& username, const std::string& password);
         RedisClientAwaitable& select(int32_t db_index);
         RedisClientAwaitable& ping();
         RedisClientAwaitable& echo(const std::string& message);
+
+        // ======================== 发布订阅 ========================
+
+        RedisClientAwaitable& publish(const std::string& channel, const std::string& message);
+        RedisClientAwaitable& subscribe(const std::string& channel);
+        RedisClientAwaitable& subscribe(const std::vector<std::string>& channels);
+        RedisClientAwaitable& unsubscribe(const std::string& channel);
+        RedisClientAwaitable& unsubscribe(const std::vector<std::string>& channels);
+        RedisClientAwaitable& psubscribe(const std::string& pattern);
+        RedisClientAwaitable& psubscribe(const std::vector<std::string>& patterns);
+        RedisClientAwaitable& punsubscribe(const std::string& pattern);
+        RedisClientAwaitable& punsubscribe(const std::vector<std::string>& patterns);
+
+        // ======================== 集群/主从命令 ========================
+
+        RedisClientAwaitable& role();
+        RedisClientAwaitable& replicaof(const std::string& host, int32_t port);
+        RedisClientAwaitable& readonly();
+        RedisClientAwaitable& readwrite();
+        RedisClientAwaitable& clusterInfo();
+        RedisClientAwaitable& clusterNodes();
+        RedisClientAwaitable& clusterSlots();
 
         // ======================== String操作 ========================
 

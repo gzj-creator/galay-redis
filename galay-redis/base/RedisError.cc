@@ -23,6 +23,7 @@ namespace galay::redis
         "buffer overflow error",
         "network error",
         "connection closed",
+        "internal error",
     };
 
 
