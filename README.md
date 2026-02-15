@@ -108,6 +108,28 @@ int main()
 | 普通模式 50x500 | 112,359 | 100% |
 | Pipeline 20x5000 batch=100 | 1,098,901 | 100% |
 
+## C++23 模块支持更新（2026-02）
+
+本次模块接口已统一为：
+
+- `module;`
+- `#include "galay-redis/module/ModulePrelude.hpp"`
+- `export module galay.redis;`
+- `export { #include ... }`
+
+对应文件：
+
+- `galay-redis/module/galay.redis.cppm`
+- `galay-redis/module/ModulePrelude.hpp`
+
+推荐构建（Clang 20 + Ninja）：
+
+```bash
+cmake -S . -B build-mod -G Ninja \
+  -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm@20/bin/clang++
+cmake --build build-mod --target galay-redis-modules -j
+```
+
 ## 文档
 
 详细文档见 [docs/](docs/)：
