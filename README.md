@@ -31,14 +31,29 @@
 - spdlog
 - OpenSSL
 
+## 依赖安装（macOS / Homebrew）
+
+```bash
+brew install cmake spdlog openssl
+```
+
+## 依赖安装（Ubuntu / Debian）
+
+```bash
+sudo apt-get update
+sudo apt-get install -y cmake g++ libspdlog-dev libssl-dev
+```
+
 ## 编译安装
 
 ```bash
+git clone https://github.com/gzj-creator/galay-kernel.git
+git clone https://github.com/gzj-creator/galay-utils.git
 git clone https://github.com/gzj-creator/galay-redis.git
 cd galay-redis
 mkdir build && cd build
 cmake ..
-make -j$(nproc)
+cmake --build . --parallel
 ```
 
 在你的 CMakeLists.txt 中链接：
@@ -127,7 +142,7 @@ int main()
 ```bash
 cmake -S . -B build-mod -G Ninja \
   -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm@20/bin/clang++
-cmake --build build-mod --target galay-redis-modules -j
+cmake --build build-mod --target galay-redis-modules --parallel
 ```
 
 ## 文档
