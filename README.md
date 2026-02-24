@@ -16,11 +16,15 @@
 
 建议按以下顺序阅读：
 
-1. [快速开始](docs/01-快速开始.md)
-2. [使用示例](docs/02-使用示例.md)
-3. [模块介绍](docs/03-模块介绍.md)
-4. [运行原理](docs/04-运行原理.md)
-5. [性能分析](docs/05-性能分析.md)
+1. [快速开始](docs/01-快速开始.md) - 编译、基本用法、API 速览、错误处理
+2. [使用示例](docs/02-使用示例.md) - 各类操作示例、连接池、主从、集群、实战场景
+3. [模块介绍](docs/03-模块介绍.md) - 核心模块、连接池、拓扑客户端等模块详解
+4. [运行原理](docs/04-运行原理.md) - 协程状态机、超时机制、RESP 编解码、路由原理
+5. [性能分析](docs/05-性能分析.md) - 基准数据、瓶颈分析、优化建议
+6. [API 文档](docs/06-API文档.md) - 完整的 API 参考文档
+7. [架构设计](docs/07-架构设计.md) - 整体架构、模块职责、设计原理
+8. [高级主题](docs/08-高级主题.md) - 性能优化、连接池、主从、集群、事务、Pub/Sub
+9. [常见问题](docs/09-常见问题.md) - 编译、连接、查询、性能等常见问题解答
 
 ## 依赖
 
@@ -108,11 +112,34 @@ int main()
 # 功能测试
 ./build/test/test_redis_client_timeout
 
-# 性能测试
-./build/test/test_redis_client_benchmark 10 100
+# 连接池/协议等其他测试
+./build/test/test_async
+```
+
+## 运行示例（example/E*）
+
+```bash
+# E1：基础异步 SET/GET/DEL
+./build/example/E1-AsyncBasicDemo 127.0.0.1 6379
+
+# E2：Pipeline 示例
+./build/example/E2-PipelineDemo 127.0.0.1 6379 demo:pipeline: 20
+
+# E3：拓扑 + Pub/Sub 示例（单机也可演示）
+./build/example/E3-TopologyPubSubDemo 127.0.0.1 6379
+```
+
+## 运行压测（benchmark/B*）
+
+```bash
+# 普通模式
+./build/benchmark/B1-RedisClientBench -h 127.0.0.1 -p 6379 -c 10 -n 100 -m normal
 
 # Pipeline 性能测试
-./build/test/test_redis_client_benchmark 20 5000 pipeline 100
+./build/benchmark/B1-RedisClientBench -h 127.0.0.1 -p 6379 -c 20 -n 5000 -m pipeline -b 100 -q
+
+# 连接池压测
+./build/benchmark/B2-ConnectionPoolBench -h 127.0.0.1 -p 6379 -c 20 -n 300 -m 4 -x 20 -q
 ```
 
 ## 性能
@@ -156,6 +183,10 @@ cmake --build build-mod --target galay-redis-modules --parallel
 | [03-模块介绍](docs/03-模块介绍.md) | 核心模块、连接池、拓扑客户端等模块详解 |
 | [04-运行原理](docs/04-运行原理.md) | 协程状态机、超时机制、RESP 编解码、路由原理 |
 | [05-性能分析](docs/05-性能分析.md) | 基准数据、瓶颈分析、优化建议 |
+| [06-API文档](docs/06-API文档.md) | 完整的 API 参考文档 |
+| [07-架构设计](docs/07-架构设计.md) | 整体架构、模块职责、设计原理 |
+| [08-高级主题](docs/08-高级主题.md) | 性能优化、连接池、主从、集群、事务、Pub/Sub |
+| [09-常见问题](docs/09-常见问题.md) | 编译、连接、查询、性能等常见问题解答 |
 
 ## 许可证
 
