@@ -202,13 +202,13 @@ namespace galay::redis
          * @brief 初始化连接池
          * @return 初始化等待体
          */
-        PoolInitializeAwaitable& initialize();
+        PoolInitializeAwaitable initialize();
 
         /**
          * @brief 获取连接（协程安全）
          * @return 连接获取等待体
          */
-        PoolAcquireAwaitable& acquire();
+        PoolAcquireAwaitable acquire();
 
         /**
          * @brief 归还连接
@@ -332,10 +332,6 @@ namespace galay::redis
         std::atomic<uint64_t> m_total_acquire_time_ms{0};
         std::atomic<double> m_max_acquire_time_ms{0.0};
         std::atomic<size_t> m_peak_active_connections{0};
-
-        // awaitable 对象
-        std::optional<PoolInitializeAwaitable> m_init_awaitable;
-        std::optional<PoolAcquireAwaitable> m_acquire_awaitable;
 
         // 日志
         std::shared_ptr<spdlog::logger> m_logger;

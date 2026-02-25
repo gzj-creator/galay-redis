@@ -51,14 +51,14 @@ namespace galay::redis
         explicit RedisMasterSlaveClient(IOScheduler* scheduler,
                                         AsyncRedisConfig config = AsyncRedisConfig::noTimeout());
 
-        RedisConnectAwaitable& connectMaster(const RedisNodeAddress& master);
-        RedisConnectAwaitable& addReplica(const RedisNodeAddress& replica);
+        RedisConnectAwaitable connectMaster(const RedisNodeAddress& master);
+        RedisConnectAwaitable addReplica(const RedisNodeAddress& replica);
 
-        RedisClientAwaitable& executeWrite(const std::string& cmd, const std::vector<std::string>& args);
-        RedisPipelineAwaitable& pipelineWrite(const std::vector<std::vector<std::string>>& commands);
-        RedisClientAwaitable& executeRead(const std::string& cmd, const std::vector<std::string>& args);
-        RedisPipelineAwaitable& pipelineRead(const std::vector<std::vector<std::string>>& commands);
-        RedisConnectAwaitable& addSentinel(const RedisNodeAddress& sentinel);
+        RedisClientAwaitable executeWrite(const std::string& cmd, const std::vector<std::string>& args);
+        RedisPipelineAwaitable pipelineWrite(const std::vector<std::vector<std::string>>& commands);
+        RedisClientAwaitable executeRead(const std::string& cmd, const std::vector<std::string>& args);
+        RedisPipelineAwaitable pipelineRead(const std::vector<std::vector<std::string>>& commands);
+        RedisConnectAwaitable addSentinel(const RedisNodeAddress& sentinel);
         void setSentinelMasterName(std::string master_name);
         void setAutoRetryAttempts(size_t attempts) noexcept;
         RedisCommandResultAwaitable refreshFromSentinel();
@@ -116,16 +116,16 @@ namespace galay::redis
         explicit RedisClusterClient(IOScheduler* scheduler,
                                     AsyncRedisConfig config = AsyncRedisConfig::noTimeout());
 
-        RedisConnectAwaitable& addNode(const RedisClusterNodeAddress& node);
+        RedisConnectAwaitable addNode(const RedisClusterNodeAddress& node);
         void setSlotRange(size_t node_index, uint16_t slot_start, uint16_t slot_end);
         void setAutoRefreshInterval(std::chrono::milliseconds interval);
 
-        RedisClientAwaitable& execute(const std::string& cmd, const std::vector<std::string>& args);
-        RedisClientAwaitable& executeByKey(const std::string& routing_key,
-                                           const std::string& cmd,
-                                           const std::vector<std::string>& args);
-        RedisPipelineAwaitable& pipelineByKey(const std::string& routing_key,
-                                              const std::vector<std::vector<std::string>>& commands);
+        RedisClientAwaitable execute(const std::string& cmd, const std::vector<std::string>& args);
+        RedisClientAwaitable executeByKey(const std::string& routing_key,
+                                          const std::string& cmd,
+                                          const std::vector<std::string>& args);
+        RedisPipelineAwaitable pipelineByKey(const std::string& routing_key,
+                                             const std::vector<std::vector<std::string>>& commands);
         RedisCommandResultAwaitable refreshSlots();
         RedisCommandResultAwaitable executeAuto(const std::string& cmd, const std::vector<std::string>& args);
         RedisCommandResultAwaitable executeByKeyAuto(const std::string& routing_key,

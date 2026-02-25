@@ -1,4 +1,4 @@
-#include "example/common/ExampleConfig.h"
+#include "examples/common/ExampleConfig.h"
 #include "galay-redis/async/RedisClient.h"
 #include "galay-redis/async/RedisTopologyClient.h"
 #include <galay-kernel/kernel/Runtime.h>

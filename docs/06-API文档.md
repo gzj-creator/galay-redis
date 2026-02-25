@@ -1,4 +1,4 @@
-# API 文档
+# 06-API文档
 
 本文档详细介绍 galay-redis 的所有公开 API。
 
@@ -436,7 +436,9 @@ auto conn_result = co_await pool.acquire().timeout(std::chrono::seconds(2));
 if (conn_result && conn_result.value()) {
     auto conn = conn_result.value();
     ScopedConnection scoped(pool, conn);
-    co_await scoped->set("key", "value");
+    if (auto __await_result = co_await scoped->set("key", "value"); !__await_result) {
+        // 错误处理：记录日志、重试或提前返回
+    }
     auto r = co_await scoped->get("key");
     // 离开作用域自动归还连接
 }

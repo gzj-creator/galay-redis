@@ -79,9 +79,13 @@ using namespace galay::kernel;
 Coroutine example(IOScheduler* scheduler)
 {
     RedisClient client(scheduler);
-    co_await client.connect("127.0.0.1", 6379);
+    if (auto __await_result = co_await client.connect("127.0.0.1", 6379); !__await_result) {
+        // 错误处理：记录日志、重试或提前返回
+    }
 
-    co_await client.set("key", "value").timeout(std::chrono::seconds(5));
+    if (auto __await_result = co_await client.set("key", "value").timeout(std::chrono::seconds(5)); !__await_result) {
+        // 错误处理：记录日志、重试或提前返回
+    }
 
     auto r = co_await client.get("key");
     if (r && r.value()) {
@@ -116,17 +120,17 @@ int main()
 ./build/test/test_async
 ```
 
-## 运行示例（example/E*）
+## 运行示例（examples/E*）
 
 ```bash
 # E1：基础异步 SET/GET/DEL
-./build/example/E1-AsyncBasicDemo 127.0.0.1 6379
+./build/examples/E1-AsyncBasicDemo 127.0.0.1 6379
 
 # E2：Pipeline 示例
-./build/example/E2-PipelineDemo 127.0.0.1 6379 demo:pipeline: 20
+./build/examples/E2-PipelineDemo 127.0.0.1 6379 demo:pipeline: 20
 
 # E3：拓扑 + Pub/Sub 示例（单机也可演示）
-./build/example/E3-TopologyPubSubDemo 127.0.0.1 6379
+./build/examples/E3-TopologyPubSubDemo 127.0.0.1 6379
 ```
 
 ## 运行压测（benchmark/B*）

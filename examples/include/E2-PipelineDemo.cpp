@@ -1,6 +1,7 @@
-#include "example/common/ExampleConfig.h"
+#include "examples/common/ExampleConfig.h"
 #include "galay-redis/async/RedisClient.h"
 #include <galay-kernel/kernel/Runtime.h>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 using namespace galay::kernel;
 using namespace galay::redis;
@@ -41,13 +43,25 @@ std::optional<int> parsePort(const char* text)
     }
 }
 
+std::optional<int> parsePositiveInt(const char* text)
+{
+    if (text == nullptr) return std::nullopt;
+    try {
+        const int value = std::stoi(text);
+        if (value <= 0) return std::nullopt;
+        return value;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 Coroutine runDemo(
     IOScheduler* scheduler,
     DemoState* state,
     std::string host,
     int port,
-    std::string key,
-    std::string value)
+    std::string key_prefix,
+    int batch_size)
 {
     RedisClient client(scheduler);
 
@@ -59,49 +73,54 @@ Coroutine runDemo(
         co_return;
     }
 
-    auto set_result = co_await client.set(key, value).timeout(
+    std::vector<std::vector<std::string>> commands;
+    commands.reserve(static_cast<size_t>(batch_size));
+    for (int i = 0; i < batch_size; ++i) {
+        const std::string key = key_prefix + std::to_string(i);
+        const std::string value = "value_" + std::to_string(i);
+        commands.push_back({"SET", key, value});
+    }
+
+    auto pipeline_result = co_await client.pipeline(commands).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
-    if (!set_result) {
-        std::cerr << "SET failed: " << set_result.error().message() << std::endl;
+    if (!pipeline_result) {
+        std::cerr << "Pipeline failed: " << pipeline_result.error().message() << std::endl;
         (void)co_await client.close();
         finishDemo(*state, 1);
         co_return;
     }
-    if (!set_result.value()) {
-        std::cerr << "SET returned empty response" << std::endl;
+    if (!pipeline_result.value()) {
+        std::cerr << "Pipeline returned empty response" << std::endl;
         (void)co_await client.close();
         finishDemo(*state, 1);
         co_return;
     }
 
-    auto get_result = co_await client.get(key).timeout(
+    std::cout << "E2 pipeline responses: " << pipeline_result.value().value().size() << std::endl;
+
+    const std::string sample_key = key_prefix + "0";
+    auto sample_result = co_await client.get(sample_key).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
-    if (!get_result) {
-        std::cerr << "GET failed: " << get_result.error().message() << std::endl;
+    if (!sample_result || !sample_result.value()) {
+        std::cerr << "Sample GET failed for " << sample_key << std::endl;
         (void)co_await client.close();
         finishDemo(*state, 1);
         co_return;
     }
-    if (!get_result.value()) {
-        std::cerr << "GET returned empty response" << std::endl;
-        (void)co_await client.close();
-        finishDemo(*state, 1);
-        co_return;
+    const auto& sample_values = sample_result.value().value();
+    if (!sample_values.empty() && sample_values[0].isString()) {
+        std::cout << "E2 sample value: " << sample_values[0].toString() << std::endl;
     }
 
-    const auto& values = get_result.value().value();
-    if (values.empty() || !values[0].isString()) {
-        std::cerr << "GET response is empty or not string" << std::endl;
-        (void)co_await client.close();
-        finishDemo(*state, 1);
-        co_return;
+    std::vector<std::vector<std::string>> cleanup_commands;
+    cleanup_commands.reserve(static_cast<size_t>(batch_size));
+    for (int i = 0; i < batch_size; ++i) {
+        cleanup_commands.push_back({"DEL", key_prefix + std::to_string(i)});
     }
-    std::cout << "E1 demo value: " << values[0].toString() << std::endl;
-
-    auto del_result = co_await client.del(key).timeout(
+    auto cleanup_result = co_await client.pipeline(cleanup_commands).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
-    if (!del_result) {
-        std::cerr << "DEL failed: " << del_result.error().message() << std::endl;
+    if (!cleanup_result) {
+        std::cerr << "Cleanup pipeline failed: " << cleanup_result.error().message() << std::endl;
         (void)co_await client.close();
         finishDemo(*state, 1);
         co_return;
@@ -123,21 +142,29 @@ int main(int argc, char* argv[])
 {
     std::string host = galay::redis::example::kDefaultRedisHost;
     int port = galay::redis::example::kDefaultRedisPort;
-    std::string key = galay::redis::example::kDefaultDemoKey;
-    std::string value = galay::redis::example::kDefaultDemoValue;
+    std::string key_prefix = galay::redis::example::kDefaultPipelinePrefix;
+    int batch_size = galay::redis::example::kDefaultPipelineBatchSize;
 
     if (argc > 1) host = argv[1];
     if (argc > 2) {
         auto parsed_port = parsePort(argv[2]);
         if (!parsed_port) {
             std::cerr << "Invalid port: " << argv[2] << std::endl;
-            std::cerr << "Usage: " << argv[0] << " [host] [port] [key] [value]" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " [host] [port] [key_prefix] [batch_size]" << std::endl;
             return 1;
         }
         port = *parsed_port;
     }
-    if (argc > 3) key = argv[3];
-    if (argc > 4) value = argv[4];
+    if (argc > 3) key_prefix = argv[3];
+    if (argc > 4) {
+        auto parsed_batch = parsePositiveInt(argv[4]);
+        if (!parsed_batch) {
+            std::cerr << "Invalid batch_size: " << argv[4] << std::endl;
+            std::cerr << "Usage: " << argv[0] << " [host] [port] [key_prefix] [batch_size]" << std::endl;
+            return 1;
+        }
+        batch_size = *parsed_batch;
+    }
 
     Runtime runtime;
     runtime.start();
@@ -150,7 +177,7 @@ int main(int argc, char* argv[])
     }
 
     DemoState state;
-    scheduler->spawn(runDemo(scheduler, &state, host, port, key, value));
+    scheduler->spawn(runDemo(scheduler, &state, host, port, key_prefix, batch_size));
 
     std::unique_lock<std::mutex> lock(state.mutex);
     const bool finished = state.cv.wait_for(lock, std::chrono::seconds(15), [&]() {

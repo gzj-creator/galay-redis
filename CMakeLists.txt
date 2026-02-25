@@ -19,5 +19,5 @@ if(BUILD_BENCHMARKS)
 endif()
 
 if(BUILD_EXAMPLES)
-    add_subdirectory(example)
+    add_subdirectory(examples)
 endif()
