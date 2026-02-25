@@ -214,20 +214,14 @@ namespace galay::redis
         }
     }
 
-    PoolInitializeAwaitable& RedisConnectionPool::initialize()
+    PoolInitializeAwaitable RedisConnectionPool::initialize()
     {
-        if (!m_init_awaitable.has_value()) {
-            m_init_awaitable.emplace(*this);
-        }
-        return *m_init_awaitable;
+        return PoolInitializeAwaitable(*this);
     }
 
-    PoolAcquireAwaitable& RedisConnectionPool::acquire()
+    PoolAcquireAwaitable RedisConnectionPool::acquire()
     {
-        if (!m_acquire_awaitable.has_value()) {
-            m_acquire_awaitable.emplace(*this);
-        }
-        return *m_acquire_awaitable;
+        return PoolAcquireAwaitable(*this);
     }
 
     void RedisConnectionPool::release(std::shared_ptr<PooledConnection> conn)

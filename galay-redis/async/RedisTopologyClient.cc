@@ -119,7 +119,7 @@ namespace galay::redis
         return m_master.get();
     }
 
-    RedisConnectAwaitable& RedisMasterSlaveClient::connectMaster(const RedisNodeAddress& master)
+    RedisConnectAwaitable RedisMasterSlaveClient::connectMaster(const RedisNodeAddress& master)
     {
         m_master_address = master;
         m_master_connected = false;
@@ -132,7 +132,7 @@ namespace galay::redis
                                       master.version);
     }
 
-    RedisConnectAwaitable& RedisMasterSlaveClient::addReplica(const RedisNodeAddress& replica)
+    RedisConnectAwaitable RedisMasterSlaveClient::addReplica(const RedisNodeAddress& replica)
     {
         auto client = std::make_unique<RedisClient>(m_scheduler, m_config);
         auto* raw_client = client.get();
@@ -147,7 +147,7 @@ namespace galay::redis
                                    replica.version);
     }
 
-    RedisConnectAwaitable& RedisMasterSlaveClient::addSentinel(const RedisNodeAddress& sentinel)
+    RedisConnectAwaitable RedisMasterSlaveClient::addSentinel(const RedisNodeAddress& sentinel)
     {
         NodeHandle node;
         node.address = sentinel;
@@ -200,13 +200,13 @@ namespace galay::redis
         return RedisCommandResultAwaitable(waiter);
     }
 
-    RedisClientAwaitable& RedisMasterSlaveClient::executeWrite(const std::string& cmd,
+    RedisClientAwaitable RedisMasterSlaveClient::executeWrite(const std::string& cmd,
                                                                const std::vector<std::string>& args)
     {
         return ensureMaster()->execute(cmd, args);
     }
 
-    RedisPipelineAwaitable& RedisMasterSlaveClient::pipelineWrite(
+    RedisPipelineAwaitable RedisMasterSlaveClient::pipelineWrite(
         const std::vector<std::vector<std::string>>& commands)
     {
         return ensureMaster()->pipeline(commands);
@@ -231,13 +231,13 @@ namespace galay::redis
         return ensureMaster();
     }
 
-    RedisClientAwaitable& RedisMasterSlaveClient::executeRead(const std::string& cmd,
+    RedisClientAwaitable RedisMasterSlaveClient::executeRead(const std::string& cmd,
                                                               const std::vector<std::string>& args)
     {
         return chooseReadClient()->execute(cmd, args);
     }
 
-    RedisPipelineAwaitable& RedisMasterSlaveClient::pipelineRead(
+    RedisPipelineAwaitable RedisMasterSlaveClient::pipelineRead(
         const std::vector<std::vector<std::string>>& commands)
     {
         return chooseReadClient()->pipeline(commands);
@@ -547,7 +547,7 @@ namespace galay::redis
         m_slot_owner.fill(-1);
     }
 
-    RedisConnectAwaitable& RedisClusterClient::addNode(const RedisClusterNodeAddress& node)
+    RedisConnectAwaitable RedisClusterClient::addNode(const RedisClusterNodeAddress& node)
     {
         ClusterNode cluster_node;
         cluster_node.address = node;
@@ -619,7 +619,7 @@ namespace galay::redis
         return RedisCommandResultAwaitable(waiter);
     }
 
-    RedisClientAwaitable& RedisClusterClient::execute(const std::string& cmd,
+    RedisClientAwaitable RedisClusterClient::execute(const std::string& cmd,
                                                       const std::vector<std::string>& args)
     {
         RedisClient* node = nullptr;
@@ -639,7 +639,7 @@ namespace galay::redis
         return node->execute(cmd, args);
     }
 
-    RedisClientAwaitable& RedisClusterClient::executeByKey(const std::string& routing_key,
+    RedisClientAwaitable RedisClusterClient::executeByKey(const std::string& routing_key,
                                                            const std::string& cmd,
                                                            const std::vector<std::string>& args)
     {
@@ -654,7 +654,7 @@ namespace galay::redis
         return node->execute(cmd, args);
     }
 
-    RedisPipelineAwaitable& RedisClusterClient::pipelineByKey(
+    RedisPipelineAwaitable RedisClusterClient::pipelineByKey(
         const std::string& routing_key,
         const std::vector<std::vector<std::string>>& commands)
     {
