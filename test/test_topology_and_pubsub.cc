@@ -67,8 +67,8 @@ namespace
 
 Coroutine runTopologyAndPubSubTests(IOScheduler* scheduler)
 {
-    RedisClient subscriber(scheduler);
-    RedisClient publisher(scheduler);
+    auto subscriber = RedisClientBuilder().scheduler(scheduler).build();
+    auto publisher = RedisClientBuilder().scheduler(scheduler).build();
     const std::string channel = "galay:test:pubsub";
 
     do {
@@ -123,7 +123,7 @@ Coroutine runTopologyAndPubSubTests(IOScheduler* scheduler)
         }
 
         {
-            RedisMasterSlaveClient ms_client(scheduler);
+            auto ms_client = RedisMasterSlaveClientBuilder().scheduler(scheduler).build();
             RedisNodeAddress node_addr;
             node_addr.host = "127.0.0.1";
             node_addr.port = 6379;
@@ -166,7 +166,7 @@ Coroutine runTopologyAndPubSubTests(IOScheduler* scheduler)
         }
 
         {
-            RedisMasterSlaveClient ms_auto(scheduler);
+            auto ms_auto = RedisMasterSlaveClientBuilder().scheduler(scheduler).build();
             ms_auto.setAutoRetryAttempts(3);
             RedisNodeAddress node_addr;
             node_addr.host = "127.0.0.1";
@@ -207,7 +207,7 @@ Coroutine runTopologyAndPubSubTests(IOScheduler* scheduler)
         }
 
         {
-            RedisClusterClient cluster_client(scheduler);
+            auto cluster_client = RedisClusterClientBuilder().scheduler(scheduler).build();
 
             RedisClusterNodeAddress node1;
             node1.host = "127.0.0.1";

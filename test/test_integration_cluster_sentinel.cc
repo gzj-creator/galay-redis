@@ -146,7 +146,7 @@ namespace
 Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
 {
     do {
-        RedisClusterClient cluster(scheduler);
+        auto cluster = RedisClusterClientBuilder().scheduler(scheduler).build();
         cluster.setAutoRefreshInterval(std::chrono::milliseconds(1000));
 
         RedisClusterNodeAddress seed;
@@ -186,7 +186,7 @@ Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
         }
 
         if (!cfg.ask_key.empty()) {
-            RedisClient direct_seed(scheduler);
+            auto direct_seed = RedisClientBuilder().scheduler(scheduler).build();
             auto direct_connect = co_await direct_seed.connect(cfg.cluster_host, cfg.cluster_port);
             if (!direct_connect) {
                 fail("Direct seed connect failed: " + direct_connect.error().message());
@@ -208,7 +208,7 @@ Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
             co_await direct_seed.close();
         }
 
-        RedisMasterSlaveClient ms(scheduler);
+        auto ms = RedisMasterSlaveClientBuilder().scheduler(scheduler).build();
         ms.setSentinelMasterName(cfg.sentinel_master_name);
 
         RedisNodeAddress sentinel;
@@ -241,7 +241,7 @@ Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
         }
 
         if (cfg.trigger_sentinel_failover) {
-            RedisClient sentinel_ctl(scheduler);
+            auto sentinel_ctl = RedisClientBuilder().scheduler(scheduler).build();
             auto ctl_connect = co_await sentinel_ctl.connect(cfg.sentinel_host, cfg.sentinel_port);
             if (!ctl_connect) {
                 fail("Sentinel ctl connect failed: " + ctl_connect.error().message());

@@ -177,7 +177,7 @@ void countBatchResult(
 
 Coroutine benchmarkNormal(IOScheduler* scheduler, const BenchmarkOptions* options, int client_id)
 {
-    RedisClient client(scheduler);
+    auto client = RedisClientBuilder().scheduler(scheduler).build();
     std::int64_t local_success = 0;
     std::int64_t local_error = 0;
     std::int64_t local_timeout = 0;
@@ -222,7 +222,7 @@ Coroutine benchmarkNormal(IOScheduler* scheduler, const BenchmarkOptions* option
 
 Coroutine benchmarkPipeline(IOScheduler* scheduler, const BenchmarkOptions* options, int client_id)
 {
-    RedisClient client(scheduler);
+    auto client = RedisClientBuilder().scheduler(scheduler).build();
     std::int64_t local_success = 0;
     std::int64_t local_error = 0;
     std::int64_t local_timeout = 0;

@@ -79,8 +79,8 @@ bool readCommandSingleString(const RedisCommandResult& result, std::string& out)
 
 Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, int port)
 {
-    RedisClient subscriber(scheduler);
-    RedisClient publisher(scheduler);
+    auto subscriber = RedisClientBuilder().scheduler(scheduler).build();
+    auto publisher = RedisClientBuilder().scheduler(scheduler).build();
 
     const std::string channel = galay::redis::example::kDefaultPubSubChannel;
     const std::string message = galay::redis::example::kDefaultPubSubMessage;
@@ -140,7 +140,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
     }
     std::cout << "E3 pubsub received: " << msg_array[2].toString() << std::endl;
 
-    RedisMasterSlaveClient ms_client(scheduler);
+    auto ms_client = RedisMasterSlaveClientBuilder().scheduler(scheduler).build();
     RedisNodeAddress node_addr;
     node_addr.host = host;
     node_addr.port = port;
@@ -204,7 +204,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
     }
     (void)co_await ms_client.master().close();
 
-    RedisClusterClient cluster_client(scheduler);
+    auto cluster_client = RedisClusterClientBuilder().scheduler(scheduler).build();
     RedisClusterNodeAddress cluster_node;
     cluster_node.host = host;
     cluster_node.port = port;

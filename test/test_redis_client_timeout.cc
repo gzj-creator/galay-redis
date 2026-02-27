@@ -13,7 +13,7 @@ using namespace galay::kernel;
 Coroutine testRedisClientWithTimeout(IOScheduler* scheduler)
 {
     // 创建RedisClient
-    RedisClient client(scheduler);
+    auto client = RedisClientBuilder().scheduler(scheduler).build();
 
     // 连接到Redis服务器
     auto connect_result = co_await client.connect("127.0.0.1", 6379).timeout(std::chrono::seconds(5));
@@ -118,7 +118,7 @@ Coroutine testRedisClientWithTimeout(IOScheduler* scheduler)
  */
 Coroutine testConcurrentCommands(IOScheduler* scheduler, int client_id)
 {
-    RedisClient client(scheduler);
+    auto client = RedisClientBuilder().scheduler(scheduler).build();
 
     auto connect_result = co_await client.connect("127.0.0.1", 6379).timeout(std::chrono::seconds(5));
     if (!connect_result) {

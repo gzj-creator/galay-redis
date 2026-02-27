@@ -18,7 +18,7 @@ Coroutine testAllRedisCommands(IOScheduler* scheduler)
     std::cout << "========================================\n" << std::endl;
 
     // 创建RedisClient
-    RedisClient client(scheduler);
+    auto client = RedisClientBuilder().scheduler(scheduler).build();
 
     // ==================== 测试连接 ====================
     std::cout << "=== Testing Connection Commands ===" << std::endl;
@@ -476,7 +476,7 @@ Coroutine testExecuteCommand(IOScheduler* scheduler)
 {
     std::cout << "\n=== Testing Generic EXECUTE Command ===" << std::endl;
 
-    RedisClient client(scheduler);
+    auto client = RedisClientBuilder().scheduler(scheduler).build();
 
     auto connect_result = co_await client.connect("127.0.0.1", 6379);
     if (!connect_result) {
