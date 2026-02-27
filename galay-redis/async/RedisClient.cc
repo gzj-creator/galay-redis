@@ -1150,27 +1150,7 @@ namespace galay::redis
     RedisClient::RedisClient(IOScheduler* scheduler, AsyncRedisConfig config)
         : m_scheduler(scheduler), m_config(config), m_ring_buffer(config.buffer_size)
     {
-        try {
-            m_logger = spdlog::get("AsyncRedisLogger");
-            if (!m_logger) {
-                m_logger = spdlog::stdout_color_mt("AsyncRedisLogger");
-            }
-        } catch (const spdlog::spdlog_ex& ex) {
-            // 尝试获取已存在的 logger
-            m_logger = spdlog::get("AsyncRedisLogger");
-            if (!m_logger) {
-                // 最后的备选方案：使用默认 logger
-                m_logger = spdlog::default_logger();
-                if (m_logger) {
-                    m_logger->warn("Failed to create AsyncRedisLogger, using default logger: {}", ex.what());
-                }
-            }
-        }
-
-        // 确保 logger 不为空
-        if (!m_logger) {
-            throw std::runtime_error("Failed to initialize logger for RedisClient");
-        }
+        m_logger = RedisLog::getInstance()->getLogger();
     }
 
     RedisClient::RedisClient(RedisClient&& other) noexcept

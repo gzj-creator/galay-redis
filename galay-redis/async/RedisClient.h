@@ -14,9 +14,8 @@
 #include <optional>
 #include <vector>
 #include <coroutine>
-#include <spdlog/spdlog.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
 #include "galay-redis/base/RedisError.h"
+#include "galay-redis/base/RedisLog.h"
 #include "galay-redis/base/RedisValue.h"
 #include "galay-redis/protocol/RedisProtocol.h"
 #include "AsyncRedisConfig.h"
@@ -478,6 +477,9 @@ namespace galay::redis
 
         // ======================== 连接管理 ========================
 
+        RedisLoggerPtr& logger() { return m_logger; }
+        void setLogger(RedisLoggerPtr logger) { m_logger = std::move(logger); }
+
         auto close() {
             return m_socket.close();
         }
@@ -500,7 +502,7 @@ namespace galay::redis
         AsyncRedisConfig m_config;
         RingBuffer m_ring_buffer;
 
-        std::shared_ptr<spdlog::logger> m_logger;
+        RedisLoggerPtr m_logger;
     };
 
 }

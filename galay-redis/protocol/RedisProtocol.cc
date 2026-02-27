@@ -1,7 +1,5 @@
 #include "RedisProtocol.h"
 #include <cstring>
-#include <charconv>
-#include <sstream>
 
 namespace galay::redis::protocol
 {
@@ -109,7 +107,7 @@ namespace galay::redis::protocol
 
     std::optional<size_t> RespParser::findCRLF(const char* data, size_t length, size_t offset)
     {
-        for (size_t i = offset; i < length - 1; ++i) {
+        for (size_t i = offset; i + 1 < length; ++i) {
             if (data[i] == '\r' && data[i + 1] == '\n') {
                 return i;
             }
@@ -171,6 +169,14 @@ namespace galay::redis::protocol
                 return parseMap(data, length);
             case '~':  // Set (RESP3)
                 return parseSet(data, length);
+            case '>':  // Push (RESP3)
+                return parseArray(data, length);
+            case '=':  // VerbatimString (RESP3)
+                return parseBulkString(data, length);
+            case '(':  // BigNumber (RESP3)
+                return parseSimpleString(data, length);
+            case '!':  // BlobError (RESP3)
+                return parseBulkString(data, length);
             default:
                 return std::unexpected(ParseError::InvalidType);
         }

@@ -72,7 +72,7 @@ namespace galay::redis
 
         m_pool->m_waiting_requests++;
 
-        std::lock_guard<std::mutex> lock(m_pool->m_mutex);
+        std::unique_lock<std::mutex> lock(m_pool->m_mutex);
 
         // 尝试从可用连接中获取
         while (!m_pool->m_available_connections.empty()) {
@@ -100,9 +100,9 @@ namespace galay::redis
         // 如果还可以创建新连接
         if (m_pool->m_all_connections.size() < m_pool->m_config.max_connections) {
             // 释放锁后创建连接
-            m_pool->m_mutex.unlock();
+            lock.unlock();
             auto result = m_pool->getConnectionSync();
-            m_pool->m_mutex.lock();
+            lock.lock();
 
             if (result) {
                 m_conn = result.value();
@@ -187,18 +187,7 @@ namespace galay::redis
             throw std::invalid_argument("Invalid connection pool configuration");
         }
 
-        // 初始化日志
-        try {
-            m_logger = spdlog::get("RedisConnectionPool");
-            if (!m_logger) {
-                m_logger = spdlog::stdout_color_mt("RedisConnectionPool");
-            }
-        } catch (const spdlog::spdlog_ex& ex) {
-            m_logger = spdlog::get("RedisConnectionPool");
-            if (!m_logger) {
-                m_logger = spdlog::default_logger();
-            }
-        }
+        m_logger = RedisLog::getInstance()->getLogger();
 
         RedisLogInfo(m_logger, "Connection pool created: host={}:{}, min={}, max={}, initial={}",
                      m_config.host, m_config.port,

@@ -1,8 +1,9 @@
 #include "RedisError.h"
+#include <array>
 
-namespace galay::redis 
+namespace galay::redis
 {
-    const char* msg[] = {
+    static constexpr std::array<const char*, 21> msg = {{
         "success",
         "url invalid error",
         "host invalid error",
@@ -24,7 +25,7 @@ namespace galay::redis
         "network error",
         "connection closed",
         "internal error",
-    };
+    }};
 
 
     RedisError::RedisError(RedisErrorType type)
@@ -38,15 +39,17 @@ namespace galay::redis
     }
 
     RedisErrorType RedisError::type() const
-    {   
+    {
         return m_type;
     }
 
     std::string RedisError::message() const
     {
+        auto idx = static_cast<size_t>(m_type);
+        const char* base_msg = (idx < msg.size()) ? msg[idx] : "unknown error";
         if(! m_extra_msg.empty()) {
-            return std::string(msg[static_cast<int>(m_type)]) + " extra:" + m_extra_msg;
-        } 
-        return msg[static_cast<int>(m_type)];
+            return std::string(base_msg) + " extra:" + m_extra_msg;
+        }
+        return base_msg;
     }
 }
