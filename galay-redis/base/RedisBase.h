@@ -3,32 +3,21 @@
 
 #include <concepts>
 #include <string>
+#include <cstdint>
 
-namespace galay::redis 
+namespace galay::redis
 {
     template <typename T>
-    concept KVPair = requires(T type)
-    {
-        std::is_same_v<T, std::pair<std::string, std::string>>;
-    };
+    concept KVPair = std::same_as<T, std::pair<std::string, std::string>>;
 
     template <typename T>
-    concept KeyType = requires(T type)
-    {
-        std::is_same_v<T, std::string>;
-    };
+    concept KeyType = std::same_as<T, std::string>;
 
     template <typename T>
-    concept ValType = requires(T type)
-    {
-        std::is_same_v<T, std::string>;
-    };
+    concept ValType = std::same_as<T, std::string> || std::same_as<T, int64_t> || std::same_as<T, double>;
 
     template <typename T>
-    concept ScoreValType = requires(T type)
-    {
-        std::is_same_v<T, std::pair<double, std::string>>;
-    };
+    concept ScoreValType = std::same_as<T, std::pair<double, std::string>>;
 
 }
 

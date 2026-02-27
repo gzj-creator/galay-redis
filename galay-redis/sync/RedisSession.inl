@@ -3,136 +3,145 @@
 
 #include "RedisSession.h"
 
-namespace galay::redis 
+namespace galay::redis
 {
 
 template <KVPair... KV>
 inline std::expected<RedisValue, RedisError> RedisSession::mset(KV... pairs)
 {
-    m_stream << "MSET";
-    ((m_stream << " " << std::get<0>(pairs) << " " << std::get<1>(pairs)), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("MSET");
+    ((cmd_parts.push_back(std::get<0>(pairs)), cmd_parts.push_back(std::get<1>(pairs))), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template<KeyType... Key>
 inline std::expected<RedisValue, RedisError> RedisSession::mget(Key... keys)
 {
-    m_stream << "MGET";
-    ((m_stream << " " << keys), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("MGET");
+    ((cmd_parts.push_back(keys)), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <KeyType... Key>
 inline std::expected<RedisValue, RedisError> RedisSession::hdel(const std::string& key, Key... fields)
 {
-    m_stream << "HDEL " << key;
-    ((m_stream << " " << fields), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("HDEL");
+    cmd_parts.push_back(key);
+    ((cmd_parts.push_back(fields)), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <KeyType... Key>
 inline std::expected<RedisValue, RedisError> RedisSession::hmget(const std::string &key, Key... field)
 {
-    m_stream << "HMGET " << key;
-    ((m_stream << " " << field), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("HMGET");
+    cmd_parts.push_back(key);
+    ((cmd_parts.push_back(field)), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <KVPair... KV>
 inline std::expected<RedisValue, RedisError> RedisSession::hmset(const std::string& key, KV... pairs)
 {
-    m_stream << "HMSET " << key;
-    ((m_stream << " " << std::get<0>(pairs) << " " << std::get<1>(pairs)), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("HMSET");
+    cmd_parts.push_back(key);
+    ((cmd_parts.push_back(std::get<0>(pairs)), cmd_parts.push_back(std::get<1>(pairs))), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <ValType... Val>
 inline std::expected<RedisValue, RedisError> RedisSession::lpush(const std::string& key, Val... values)
 {
-    m_stream << "LPUSH " << key;
-    ((m_stream << " " << values), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("LPUSH");
+    cmd_parts.push_back(key);
+    ((cmd_parts.push_back(values)), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <ValType... Val>
 inline std::expected<RedisValue, RedisError> RedisSession::rpush(const std::string& key, Val... values)
 {
-    m_stream << "RPUSH " << key;
-    ((m_stream << " " << values), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("RPUSH");
+    cmd_parts.push_back(key);
+    ((cmd_parts.push_back(values)), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <ValType... Val>
 inline std::expected<RedisValue, RedisError> RedisSession::sadd(const std::string &key, Val... members)
 {
-    m_stream << "SADD " << key;
-    ((m_stream << " " << members), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("SADD");
+    cmd_parts.push_back(key);
+    ((cmd_parts.push_back(members)), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <ValType... Val>
 inline std::expected<RedisValue, RedisError> RedisSession::srem(const std::string &key, Val... members)
 {
-    m_stream << "SREM " << key;
-    ((m_stream << " " << members), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("SREM");
+    cmd_parts.push_back(key);
+    ((cmd_parts.push_back(members)), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <KeyType... Key>
 inline std::expected<RedisValue, RedisError> RedisSession::sinter(Key... keys)
 {
-    m_stream << "SINTER";
-    ((m_stream << " " << keys), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("SINTER");
+    ((cmd_parts.push_back(keys)), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <KeyType... Key>
 inline std::expected<RedisValue, RedisError> RedisSession::sunion(Key... keys)
 {
-    m_stream << "SUNION";
-    ((m_stream << " " << keys), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("SUNION");
+    ((cmd_parts.push_back(keys)), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <ScoreValType... KV>
 inline std::expected<RedisValue, RedisError> RedisSession::zadd(const std::string &key, KV... values)
 {
-    m_stream << "ZADD " << key;
-    ((m_stream << " " << std::to_string(std::get<0>(values)) << " " << std::get<1>(values)), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("ZADD");
+    cmd_parts.push_back(key);
+    ((cmd_parts.push_back(std::to_string(std::get<0>(values))), cmd_parts.push_back(std::get<1>(values))), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 
 template <KeyType... Key>
 inline std::expected<RedisValue, RedisError> RedisSession::zrem(const std::string &key, Key... members)
 {
-    m_stream << "ZREM " << key;
-    ((m_stream << " " << members), ...);
-    auto reply = redisCommand(m_stream.str());
-    m_stream.str("");
+    std::vector<std::string> cmd_parts;
+    cmd_parts.push_back("ZREM");
+    cmd_parts.push_back(key);
+    ((cmd_parts.push_back(members)), ...);
+    auto reply = redisCommand(m_encoder.encodeCommand(cmd_parts));
     return reply;
 }
 

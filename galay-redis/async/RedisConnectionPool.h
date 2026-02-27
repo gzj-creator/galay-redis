@@ -287,6 +287,9 @@ namespace galay::redis
          */
         const ConnectionPoolConfig& getConfig() const { return m_config; }
 
+        RedisLoggerPtr& logger() { return m_logger; }
+        void setLogger(RedisLoggerPtr logger) { m_logger = std::move(logger); }
+
         ~RedisConnectionPool();
 
     private:
@@ -334,7 +337,7 @@ namespace galay::redis
         std::atomic<size_t> m_peak_active_connections{0};
 
         // 日志
-        std::shared_ptr<spdlog::logger> m_logger;
+        RedisLoggerPtr m_logger;
     };
 
     /**
