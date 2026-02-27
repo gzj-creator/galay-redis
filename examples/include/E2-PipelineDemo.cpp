@@ -63,7 +63,7 @@ Coroutine runDemo(
     std::string key_prefix,
     int batch_size)
 {
-    RedisClient client(scheduler);
+    auto client = RedisClientBuilder().scheduler(scheduler).build();
 
     auto connect_result = co_await client.connect(host, port).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));

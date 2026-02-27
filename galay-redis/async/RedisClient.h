@@ -14,6 +14,7 @@
 #include <optional>
 #include <vector>
 #include <coroutine>
+#include <utility>
 #include "galay-redis/base/RedisError.h"
 #include "galay-redis/base/RedisLog.h"
 #include "galay-redis/base/RedisValue.h"
@@ -41,6 +42,51 @@ namespace galay::redis
 
     // 前向声明
     class RedisClient;
+
+    class RedisClientBuilder
+    {
+    public:
+        RedisClientBuilder& scheduler(IOScheduler* scheduler)
+        {
+            m_scheduler = scheduler;
+            return *this;
+        }
+
+        RedisClientBuilder& config(AsyncRedisConfig config)
+        {
+            m_config = std::move(config);
+            return *this;
+        }
+
+        RedisClientBuilder& sendTimeout(std::chrono::milliseconds timeout)
+        {
+            m_config.send_timeout = timeout;
+            return *this;
+        }
+
+        RedisClientBuilder& recvTimeout(std::chrono::milliseconds timeout)
+        {
+            m_config.recv_timeout = timeout;
+            return *this;
+        }
+
+        RedisClientBuilder& bufferSize(size_t size)
+        {
+            m_config.buffer_size = size;
+            return *this;
+        }
+
+        RedisClient build() const;
+
+        AsyncRedisConfig buildConfig() const
+        {
+            return m_config;
+        }
+
+    private:
+        IOScheduler* m_scheduler = nullptr;
+        AsyncRedisConfig m_config = AsyncRedisConfig::noTimeout();
+    };
 
     /**
      * @brief Redis客户端等待体
@@ -504,6 +550,11 @@ namespace galay::redis
 
         RedisLoggerPtr m_logger;
     };
+
+    inline galay::redis::RedisClient galay::redis::RedisClientBuilder::build() const
+    {
+        return RedisClient(m_scheduler, m_config);
+    }
 
 }
 

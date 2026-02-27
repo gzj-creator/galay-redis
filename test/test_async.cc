@@ -10,7 +10,7 @@ Coroutine testAsyncRedisClient(IOScheduler* scheduler)
 {
     std::cout << "Testing asynchronous RedisClient operations..." << std::endl;
 
-    RedisClient client(scheduler);
+    auto client = RedisClientBuilder().scheduler(scheduler).build();
 
     std::cout << "Connecting to Redis server..." << std::endl;
     auto connect_result = co_await client.connect("127.0.0.1", 6379);

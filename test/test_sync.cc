@@ -17,7 +17,7 @@ int main()
     }
 
     AsyncRedisConfig client_config = AsyncRedisConfig::noTimeout();
-    RedisClient client(scheduler, client_config);
+    auto client = RedisClientBuilder().scheduler(scheduler).config(client_config).build();
 
     auto pool_config = ConnectionPoolConfig::create("127.0.0.1", 6379, 1, 2);
     RedisConnectionPool pool(scheduler, pool_config);

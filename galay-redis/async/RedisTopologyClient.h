@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <utility>
 #include "galay-kernel/concurrency/AsyncWaiter.h"
 #include "RedisClient.h"
 
@@ -43,6 +44,53 @@ namespace galay::redis
         std::string password;
         int32_t db_index = 0;
         int version = 2;
+    };
+
+    class RedisMasterSlaveClient;
+
+    class RedisMasterSlaveClientBuilder
+    {
+    public:
+        RedisMasterSlaveClientBuilder& scheduler(IOScheduler* scheduler)
+        {
+            m_scheduler = scheduler;
+            return *this;
+        }
+
+        RedisMasterSlaveClientBuilder& config(AsyncRedisConfig config)
+        {
+            m_config = std::move(config);
+            return *this;
+        }
+
+        RedisMasterSlaveClientBuilder& sendTimeout(std::chrono::milliseconds timeout)
+        {
+            m_config.send_timeout = timeout;
+            return *this;
+        }
+
+        RedisMasterSlaveClientBuilder& recvTimeout(std::chrono::milliseconds timeout)
+        {
+            m_config.recv_timeout = timeout;
+            return *this;
+        }
+
+        RedisMasterSlaveClientBuilder& bufferSize(size_t size)
+        {
+            m_config.buffer_size = size;
+            return *this;
+        }
+
+        RedisMasterSlaveClient build() const;
+
+        AsyncRedisConfig buildConfig() const
+        {
+            return m_config;
+        }
+
+    private:
+        IOScheduler* m_scheduler = nullptr;
+        AsyncRedisConfig m_config = AsyncRedisConfig::noTimeout();
     };
 
     class RedisMasterSlaveClient
@@ -108,6 +156,53 @@ namespace galay::redis
     {
         uint16_t slot_start = 0;
         uint16_t slot_end = 16383;
+    };
+
+    class RedisClusterClient;
+
+    class RedisClusterClientBuilder
+    {
+    public:
+        RedisClusterClientBuilder& scheduler(IOScheduler* scheduler)
+        {
+            m_scheduler = scheduler;
+            return *this;
+        }
+
+        RedisClusterClientBuilder& config(AsyncRedisConfig config)
+        {
+            m_config = std::move(config);
+            return *this;
+        }
+
+        RedisClusterClientBuilder& sendTimeout(std::chrono::milliseconds timeout)
+        {
+            m_config.send_timeout = timeout;
+            return *this;
+        }
+
+        RedisClusterClientBuilder& recvTimeout(std::chrono::milliseconds timeout)
+        {
+            m_config.recv_timeout = timeout;
+            return *this;
+        }
+
+        RedisClusterClientBuilder& bufferSize(size_t size)
+        {
+            m_config.buffer_size = size;
+            return *this;
+        }
+
+        RedisClusterClient build() const;
+
+        AsyncRedisConfig buildConfig() const
+        {
+            return m_config;
+        }
+
+    private:
+        IOScheduler* m_scheduler = nullptr;
+        AsyncRedisConfig m_config = AsyncRedisConfig::noTimeout();
     };
 
     class RedisClusterClient
@@ -186,6 +281,16 @@ namespace galay::redis
         std::chrono::steady_clock::time_point m_last_refresh_time{};
         bool m_slot_cache_ready = false;
     };
+
+    inline galay::redis::RedisMasterSlaveClient galay::redis::RedisMasterSlaveClientBuilder::build() const
+    {
+        return RedisMasterSlaveClient(m_scheduler, m_config);
+    }
+
+    inline galay::redis::RedisClusterClient galay::redis::RedisClusterClientBuilder::build() const
+    {
+        return RedisClusterClient(m_scheduler, m_config);
+    }
 }
 
 #endif // GALAY_REDIS_TOPOLOGY_CLIENT_H
