@@ -3,9 +3,11 @@ project(galay-redis)
 
 message(STATUS "CXX_STANDARD: ${CMAKE_CXX_STANDARD}")
 
-option(BUILD_TESTS "Build test programs" ON)
-option(BUILD_BENCHMARKS "Build benchmark programs" ON)
-option(BUILD_EXAMPLES "Build example programs" ON)
+# 构建选项 / 平台选项
+include(cmake/option.cmake)
+
+# 配置 IO 后端
+configure_io_backend()
 
 add_subdirectory(galay-redis)
 
