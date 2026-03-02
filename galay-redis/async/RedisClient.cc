@@ -824,7 +824,7 @@ namespace galay::redis
         , m_db_index(db_index)
         , m_version(version)
         , m_state(State::Invalid)
-        , m_result({})
+        , m_result(std::in_place)
     {
     }
 
