@@ -9,6 +9,8 @@
 #include <expected>
 #include <cstdint>
 #include <string_view>
+#include <charconv>
+#include <type_traits>
 
 namespace galay::redis::protocol
 {
@@ -202,8 +204,25 @@ namespace galay::redis::protocol
 
         // 直接追加编码后的命令，避免每条命令产生临时字符串
         void appendCommand(std::string& out, const std::vector<std::string>& cmd_parts) const;
+        void appendCommand(std::string& out,
+                           std::string_view cmd,
+                           const std::vector<std::string>& args) const;
+        void appendCommand(std::string& out,
+                           std::string_view cmd,
+                           std::initializer_list<std::string_view> args) const;
 
     private:
+        static void appendUnsignedDecimal(std::string& out, size_t value)
+        {
+            char buf[32];
+            auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
+            if (ec == std::errc()) {
+                out.append(buf, static_cast<size_t>(ptr - buf));
+            } else {
+                out += std::to_string(value);
+            }
+        }
+
         static size_t decimalDigits(size_t value)
         {
             size_t digits = 1;
@@ -222,7 +241,7 @@ namespace galay::redis::protocol
         static void appendBulkString(std::string& out, std::string_view value)
         {
             out.push_back('$');
-            out += std::to_string(value.size());
+            appendUnsignedDecimal(out, value.size());
             out += "\r\n";
             out.append(value.data(), value.size());
             out += "\r\n";
@@ -240,8 +259,14 @@ namespace galay::redis::protocol
                                  std::is_same_v<Decayed, char*>) {
                 appendBulkString(out, value ? std::string_view(value) : std::string_view{});
             } else if constexpr (std::is_integral_v<Decayed>) {
-                auto str = std::to_string(value);
-                appendBulkString(out, str);
+                char buf[32];
+                auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
+                if (ec == std::errc()) {
+                    appendBulkString(out, std::string_view(buf, static_cast<size_t>(ptr - buf)));
+                } else {
+                    auto str = std::to_string(value);
+                    appendBulkString(out, str);
+                }
             } else if constexpr (std::is_floating_point_v<Decayed>) {
                 auto str = std::to_string(value);
                 appendBulkString(out, str);

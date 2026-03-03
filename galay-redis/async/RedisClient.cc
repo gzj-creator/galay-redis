@@ -39,29 +39,43 @@ namespace galay::redis
             return total;
         }
 
-        const char* prepareParseInput(const std::vector<struct iovec>& read_iovecs,
+        size_t estimateRespCommandBytes(std::string_view cmd, const std::vector<std::string>& args)
+        {
+            size_t total = 1 + decimalDigits(1 + args.size()) + 2;
+            total += 1 + decimalDigits(cmd.size()) + 2 + cmd.size() + 2;
+            for (const auto& arg : args) {
+                total += 1 + decimalDigits(arg.size()) + 2 + arg.size() + 2;
+            }
+            return total;
+        }
+
+        const char* prepareParseInput(const struct iovec* read_iovecs,
+                                      size_t read_iovec_count,
                                       std::string& parse_buffer,
                                       size_t& len)
         {
-            if (read_iovecs.empty()) {
+            if (read_iovecs == nullptr || read_iovec_count == 0) {
                 len = 0;
                 return nullptr;
             }
 
-            if (read_iovecs.size() == 1) {
+            if (read_iovec_count == 1) {
                 len = read_iovecs[0].iov_len;
                 return static_cast<const char*>(read_iovecs[0].iov_base);
             }
 
             len = 0;
-            for (const auto& iov : read_iovecs) {
-                len += iov.iov_len;
+            for (size_t i = 0; i < read_iovec_count; ++i) {
+                len += read_iovecs[i].iov_len;
             }
 
             parse_buffer.clear();
             parse_buffer.reserve(len);
-            for (const auto& iov : read_iovecs) {
-                parse_buffer.append(static_cast<const char*>(iov.iov_base), iov.iov_len);
+            for (size_t i = 0; i < read_iovec_count; ++i) {
+                parse_buffer.append(
+                    static_cast<const char*>(read_iovecs[i].iov_base),
+                    read_iovecs[i].iov_len
+                );
             }
             return parse_buffer.data();
         }
@@ -161,8 +175,10 @@ namespace galay::redis
 
     bool RedisClientAwaitable::ProtocolRecvAwaitable::prepareRecvWindow()
     {
-        auto write_iovecs = m_owner->m_client->m_ring_buffer.getWriteIovecs();
-        if (write_iovecs.empty()) {
+        struct iovec write_iovecs[2];
+        const size_t write_iovec_count =
+            m_owner->m_client->m_ring_buffer.getWriteIovecs(write_iovecs, 2);
+        if (write_iovec_count == 0) {
             return false;
         }
 
@@ -265,13 +281,9 @@ namespace galay::redis
         , m_result(std::nullopt)
     {
         if (!m_recv_only) {
-            std::vector<std::string> cmd_parts;
-            cmd_parts.reserve(1 + m_args.size());
-            cmd_parts.push_back(m_cmd);
-            cmd_parts.insert(cmd_parts.end(), m_args.begin(), m_args.end());
             m_encoded_cmd.clear();
-            m_encoded_cmd.reserve(estimateRespCommandBytes(cmd_parts));
-            m_client->m_encoder.appendCommand(m_encoded_cmd, cmd_parts);
+            m_encoded_cmd.reserve(estimateRespCommandBytes(m_cmd, m_args));
+            m_client->m_encoder.appendCommand(m_encoded_cmd, m_cmd, m_args);
         }
 
         m_values.reserve(m_expected_replies);
@@ -356,14 +368,15 @@ namespace galay::redis
 
     bool RedisClientAwaitable::parseResponsesFromRingBuffer()
     {
+        struct iovec read_iovecs[2];
         while (m_values.size() < m_expected_replies) {
-            auto read_iovecs = m_client->m_ring_buffer.getReadIovecs();
-            if (read_iovecs.empty()) {
+            const size_t read_iovec_count = m_client->m_ring_buffer.getReadIovecs(read_iovecs, 2);
+            if (read_iovec_count == 0) {
                 return false;
             }
 
             size_t len = 0;
-            const char* data = prepareParseInput(read_iovecs, m_parse_buffer, len);
+            const char* data = prepareParseInput(read_iovecs, read_iovec_count, m_parse_buffer, len);
             if (data == nullptr) {
                 return false;
             }
@@ -540,8 +553,10 @@ namespace galay::redis
 
     bool RedisPipelineAwaitable::ProtocolRecvAwaitable::prepareRecvWindow()
     {
-        auto write_iovecs = m_owner->m_client->m_ring_buffer.getWriteIovecs();
-        if (write_iovecs.empty()) {
+        struct iovec write_iovecs[2];
+        const size_t write_iovec_count =
+            m_owner->m_client->m_ring_buffer.getWriteIovecs(write_iovecs, 2);
+        if (write_iovec_count == 0) {
             return false;
         }
 
@@ -722,14 +737,15 @@ namespace galay::redis
 
     bool RedisPipelineAwaitable::parseResponsesFromRingBuffer()
     {
+        struct iovec read_iovecs[2];
         while (m_values.size() < m_expected_replies) {
-            auto read_iovecs = m_client->m_ring_buffer.getReadIovecs();
-            if (read_iovecs.empty()) {
+            const size_t read_iovec_count = m_client->m_ring_buffer.getReadIovecs(read_iovecs, 2);
+            if (read_iovec_count == 0) {
                 return false;
             }
 
             size_t len = 0;
-            const char* data = prepareParseInput(read_iovecs, m_parse_buffer, len);
+            const char* data = prepareParseInput(read_iovecs, read_iovec_count, m_parse_buffer, len);
             if (data == nullptr) {
                 return false;
             }
@@ -855,15 +871,21 @@ namespace galay::redis
             // 需要认证
             m_state = State::Authenticating;
 
-            // 编码认证命令
-            std::vector<std::string> auth_cmd;
+            // 编码认证命令（避免构造临时 vector）
+            m_encoded_cmd.clear();
             if (m_username.empty()) {
-                auth_cmd = {"AUTH", m_password};
+                m_client->m_encoder.appendCommand(
+                    m_encoded_cmd,
+                    "AUTH",
+                    {std::string_view(m_password)}
+                );
             } else {
-                auth_cmd = {"AUTH", m_username, m_password};
+                m_client->m_encoder.appendCommand(
+                    m_encoded_cmd,
+                    "AUTH",
+                    {std::string_view(m_username), std::string_view(m_password)}
+                );
             }
-
-            m_encoded_cmd = m_client->m_encoder.encodeCommand(auth_cmd);
             m_sent = 0;
 
             // 发送认证命令
@@ -890,8 +912,13 @@ namespace galay::redis
             }
 
             // 发送 SELECT 命令
-            std::vector<std::string> select_cmd = {"SELECT", std::to_string(m_db_index)};
-            m_encoded_cmd = m_client->m_encoder.encodeCommand(select_cmd);
+            m_encoded_cmd.clear();
+            const std::string db_index_str = std::to_string(m_db_index);
+            m_client->m_encoder.appendCommand(
+                m_encoded_cmd,
+                "SELECT",
+                {std::string_view(db_index_str)}
+            );
             m_sent = 0;
 
             m_send_awaitable.emplace(m_client->m_socket.send(
@@ -994,21 +1021,22 @@ namespace galay::redis
             m_client->m_ring_buffer.produce(n);
 
             // 解析认证响应
-            auto read_iovecs = m_client->m_ring_buffer.getReadIovecs();
-            if (read_iovecs.empty()) {
+            struct iovec read_iovecs[2];
+            const size_t read_iovec_count = m_client->m_ring_buffer.getReadIovecs(read_iovecs, 2);
+            if (read_iovec_count == 0) {
                 RedisLogDebug(m_client->m_logger, "AUTH response incomplete");
                 return {};  // 继续接收
             }
 
             size_t len = 0;
-            const char* data = prepareParseInput(read_iovecs, m_parse_buffer, len);
+            const char* data = prepareParseInput(read_iovecs, read_iovec_count, m_parse_buffer, len);
             if (data == nullptr) {
                 RedisLogDebug(m_client->m_logger, "AUTH response parse buffer unavailable");
                 return {};
             }
 
-            auto parse_result = m_client->m_parser.parse(data, len);
-
+            protocol::RedisReply value;
+            auto parse_result = m_client->m_parser.parseFast(data, len, &value);
             if (!parse_result) {
                 if (parse_result.error() == protocol::ParseError::Incomplete) {
                     return {};  // 继续接收
@@ -1020,8 +1048,7 @@ namespace galay::redis
                                                          "Parse AUTH response error"));
             }
 
-            auto [consumed, value] = parse_result.value();
-            m_client->m_ring_buffer.consume(consumed);
+            m_client->m_ring_buffer.consume(parse_result.value());
 
             // 检查认证结果
             if (value.isError()) {
@@ -1092,21 +1119,22 @@ namespace galay::redis
             m_client->m_ring_buffer.produce(n);
 
             // 解析 SELECT 响应
-            auto read_iovecs = m_client->m_ring_buffer.getReadIovecs();
-            if (read_iovecs.empty()) {
+            struct iovec read_iovecs[2];
+            const size_t read_iovec_count = m_client->m_ring_buffer.getReadIovecs(read_iovecs, 2);
+            if (read_iovec_count == 0) {
                 RedisLogDebug(m_client->m_logger, "SELECT response incomplete");
                 return {};  // 继续接收
             }
 
             size_t len = 0;
-            const char* data = prepareParseInput(read_iovecs, m_parse_buffer, len);
+            const char* data = prepareParseInput(read_iovecs, read_iovec_count, m_parse_buffer, len);
             if (data == nullptr) {
                 RedisLogDebug(m_client->m_logger, "SELECT response parse buffer unavailable");
                 return {};
             }
 
-            auto parse_result = m_client->m_parser.parse(data, len);
-
+            protocol::RedisReply value;
+            auto parse_result = m_client->m_parser.parseFast(data, len, &value);
             if (!parse_result) {
                 if (parse_result.error() == protocol::ParseError::Incomplete) {
                     return {};  // 继续接收
@@ -1118,8 +1146,7 @@ namespace galay::redis
                                                          "Parse SELECT response error"));
             }
 
-            auto [consumed, value] = parse_result.value();
-            m_client->m_ring_buffer.consume(consumed);
+            m_client->m_ring_buffer.consume(parse_result.value());
 
             // 检查 SELECT 结果
             if (value.isError()) {
