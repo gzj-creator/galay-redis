@@ -496,7 +496,7 @@ namespace galay::redis::protocol
         std::string result;
         result.reserve(estimated);
         result.push_back('*');
-        result += std::to_string(elements.size());
+        appendUnsignedDecimal(result, elements.size());
         result += "\r\n";
         for (const auto& elem : elements) {
             appendBulkString(result, elem);
@@ -518,7 +518,7 @@ namespace galay::redis::protocol
         std::string result;
         result.reserve(estimated);
         result.push_back('*');
-        result += std::to_string(cmd_parts.size());
+        appendUnsignedDecimal(result, cmd_parts.size());
         result += "\r\n";
         for (const auto& part : cmd_parts) {
             appendBulkString(result, part);
@@ -540,10 +540,50 @@ namespace galay::redis::protocol
         out.reserve(estimated);
 
         out.push_back('*');
-        out += std::to_string(cmd_parts.size());
+        appendUnsignedDecimal(out, cmd_parts.size());
         out += "\r\n";
         for (const auto& part : cmd_parts) {
             appendBulkString(out, part);
+        }
+    }
+
+    void RespEncoder::appendCommand(std::string& out,
+                                    std::string_view cmd,
+                                    const std::vector<std::string>& args) const
+    {
+        const size_t arg_count = 1 + args.size();
+        size_t estimated = out.size() + 1 + decimalDigits(arg_count) + 2 + estimateBulkStringBytes(cmd.size());
+        for (const auto& arg : args) {
+            estimated += estimateBulkStringBytes(arg.size());
+        }
+        out.reserve(estimated);
+
+        out.push_back('*');
+        appendUnsignedDecimal(out, arg_count);
+        out += "\r\n";
+        appendBulkString(out, cmd);
+        for (const auto& arg : args) {
+            appendBulkString(out, arg);
+        }
+    }
+
+    void RespEncoder::appendCommand(std::string& out,
+                                    std::string_view cmd,
+                                    std::initializer_list<std::string_view> args) const
+    {
+        const size_t arg_count = 1 + args.size();
+        size_t estimated = out.size() + 1 + decimalDigits(arg_count) + 2 + estimateBulkStringBytes(cmd.size());
+        for (const auto& arg : args) {
+            estimated += estimateBulkStringBytes(arg.size());
+        }
+        out.reserve(estimated);
+
+        out.push_back('*');
+        appendUnsignedDecimal(out, arg_count);
+        out += "\r\n";
+        appendBulkString(out, cmd);
+        for (const auto& arg : args) {
+            appendBulkString(out, arg);
         }
     }
 
@@ -558,7 +598,7 @@ namespace galay::redis::protocol
         std::string result;
         result.reserve(estimated);
         result.push_back('*');
-        result += std::to_string(arg_count);
+        appendUnsignedDecimal(result, arg_count);
         result += "\r\n";
         appendBulkString(result, cmd);
         for (const auto& arg : args) {
