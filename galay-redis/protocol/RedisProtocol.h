@@ -109,45 +109,50 @@ namespace galay::redis::protocol
         std::expected<std::pair<size_t, RedisReply>, ParseError>
             parse(const char* data, size_t length);
 
+        // 热路径解析接口：输出到 out，避免 pair 临时对象
+        std::expected<size_t, ParseError> parseFast(const char* data,
+                                                    size_t length,
+                                                    RedisReply* out);
+
         // 重置解析器状态
         void reset();
 
     private:
         // 解析简单字符串 (+OK\r\n)
-        std::expected<std::pair<size_t, RedisReply>, ParseError>
-            parseSimpleString(const char* data, size_t length);
+        std::expected<size_t, ParseError>
+            parseSimpleStringFast(const char* data, size_t length, RedisReply* out);
 
         // 解析错误 (-Error message\r\n)
-        std::expected<std::pair<size_t, RedisReply>, ParseError>
-            parseError(const char* data, size_t length);
+        std::expected<size_t, ParseError>
+            parseErrorFast(const char* data, size_t length, RedisReply* out);
 
         // 解析整数 (:1000\r\n)
-        std::expected<std::pair<size_t, RedisReply>, ParseError>
-            parseInteger(const char* data, size_t length);
+        std::expected<size_t, ParseError>
+            parseIntegerFast(const char* data, size_t length, RedisReply* out);
 
         // 解析批量字符串 ($6\r\nfoobar\r\n)
-        std::expected<std::pair<size_t, RedisReply>, ParseError>
-            parseBulkString(const char* data, size_t length);
+        std::expected<size_t, ParseError>
+            parseBulkStringFast(const char* data, size_t length, RedisReply* out);
 
         // 解析数组 (*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n)
-        std::expected<std::pair<size_t, RedisReply>, ParseError>
-            parseArray(const char* data, size_t length);
+        std::expected<size_t, ParseError>
+            parseArrayFast(const char* data, size_t length, RedisReply* out);
 
         // 解析双精度浮点数 (,1.23\r\n) - RESP3
-        std::expected<std::pair<size_t, RedisReply>, ParseError>
-            parseDouble(const char* data, size_t length);
+        std::expected<size_t, ParseError>
+            parseDoubleFast(const char* data, size_t length, RedisReply* out);
 
         // 解析布尔值 (#t\r\n or #f\r\n) - RESP3
-        std::expected<std::pair<size_t, RedisReply>, ParseError>
-            parseBoolean(const char* data, size_t length);
+        std::expected<size_t, ParseError>
+            parseBooleanFast(const char* data, size_t length, RedisReply* out);
 
         // 解析映射 (%2\r\n+key1\r\n+val1\r\n+key2\r\n+val2\r\n) - RESP3
-        std::expected<std::pair<size_t, RedisReply>, ParseError>
-            parseMap(const char* data, size_t length);
+        std::expected<size_t, ParseError>
+            parseMapFast(const char* data, size_t length, RedisReply* out);
 
         // 解析集合 (~2\r\n+item1\r\n+item2\r\n) - RESP3
-        std::expected<std::pair<size_t, RedisReply>, ParseError>
-            parseSet(const char* data, size_t length);
+        std::expected<size_t, ParseError>
+            parseSetFast(const char* data, size_t length, RedisReply* out);
 
         // 辅助函数：查找\r\n
         std::optional<size_t> findCRLF(const char* data, size_t length, size_t offset = 0);
@@ -194,6 +199,9 @@ namespace galay::redis::protocol
 
         // 编码完整的Redis命令 - 支持初始化列表
         std::string encodeCommand(std::initializer_list<std::string> cmd_parts);
+
+        // 直接追加编码后的命令，避免每条命令产生临时字符串
+        void appendCommand(std::string& out, const std::vector<std::string>& cmd_parts) const;
 
     private:
         static size_t decimalDigits(size_t value)

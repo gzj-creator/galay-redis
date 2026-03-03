@@ -145,6 +145,20 @@ namespace galay::redis::protocol
     std::expected<std::pair<size_t, RedisReply>, ParseError>
     RespParser::parse(const char* data, size_t length)
     {
+        RedisReply reply;
+        auto fast_result = parseFast(data, length, &reply);
+        if (!fast_result) {
+            return std::unexpected(fast_result.error());
+        }
+        return std::make_pair(fast_result.value(), std::move(reply));
+    }
+
+    std::expected<size_t, ParseError>
+    RespParser::parseFast(const char* data, size_t length, RedisReply* out)
+    {
+        if (out == nullptr) {
+            return std::unexpected(ParseError::InvalidFormat);
+        }
         if (length < 1) {
             return std::unexpected(ParseError::Incomplete);
         }
@@ -152,38 +166,38 @@ namespace galay::redis::protocol
         char type_marker = data[0];
         switch (type_marker) {
             case '+':  // Simple String
-                return parseSimpleString(data, length);
+                return parseSimpleStringFast(data, length, out);
             case '-':  // Error
-                return parseError(data, length);
+                return parseErrorFast(data, length, out);
             case ':':  // Integer
-                return parseInteger(data, length);
+                return parseIntegerFast(data, length, out);
             case '$':  // Bulk String
-                return parseBulkString(data, length);
+                return parseBulkStringFast(data, length, out);
             case '*':  // Array
-                return parseArray(data, length);
+                return parseArrayFast(data, length, out);
             case ',':  // Double (RESP3)
-                return parseDouble(data, length);
+                return parseDoubleFast(data, length, out);
             case '#':  // Boolean (RESP3)
-                return parseBoolean(data, length);
+                return parseBooleanFast(data, length, out);
             case '%':  // Map (RESP3)
-                return parseMap(data, length);
+                return parseMapFast(data, length, out);
             case '~':  // Set (RESP3)
-                return parseSet(data, length);
+                return parseSetFast(data, length, out);
             case '>':  // Push (RESP3)
-                return parseArray(data, length);
+                return parseArrayFast(data, length, out);
             case '=':  // VerbatimString (RESP3)
-                return parseBulkString(data, length);
+                return parseBulkStringFast(data, length, out);
             case '(':  // BigNumber (RESP3)
-                return parseSimpleString(data, length);
+                return parseSimpleStringFast(data, length, out);
             case '!':  // BlobError (RESP3)
-                return parseBulkString(data, length);
+                return parseBulkStringFast(data, length, out);
             default:
                 return std::unexpected(ParseError::InvalidType);
         }
     }
 
-    std::expected<std::pair<size_t, RedisReply>, ParseError>
-    RespParser::parseSimpleString(const char* data, size_t length)
+    std::expected<size_t, ParseError>
+    RespParser::parseSimpleStringFast(const char* data, size_t length, RedisReply* out)
     {
         auto crlf_pos = findCRLF(data, length, 1);
         if (!crlf_pos) {
@@ -191,12 +205,12 @@ namespace galay::redis::protocol
         }
 
         std::string value(data + 1, *crlf_pos - 1);
-        RedisReply result(RespType::SimpleString, value);
-        return std::make_pair(*crlf_pos + 2, std::move(result));
+        *out = RedisReply(RespType::SimpleString, std::move(value));
+        return *crlf_pos + 2;
     }
 
-    std::expected<std::pair<size_t, RedisReply>, ParseError>
-    RespParser::parseError(const char* data, size_t length)
+    std::expected<size_t, ParseError>
+    RespParser::parseErrorFast(const char* data, size_t length, RedisReply* out)
     {
         auto crlf_pos = findCRLF(data, length, 1);
         if (!crlf_pos) {
@@ -204,12 +218,12 @@ namespace galay::redis::protocol
         }
 
         std::string value(data + 1, *crlf_pos - 1);
-        RedisReply result(RespType::Error, value);
-        return std::make_pair(*crlf_pos + 2, std::move(result));
+        *out = RedisReply(RespType::Error, std::move(value));
+        return *crlf_pos + 2;
     }
 
-    std::expected<std::pair<size_t, RedisReply>, ParseError>
-    RespParser::parseInteger(const char* data, size_t length)
+    std::expected<size_t, ParseError>
+    RespParser::parseIntegerFast(const char* data, size_t length, RedisReply* out)
     {
         auto crlf_pos = findCRLF(data, length, 1);
         if (!crlf_pos) {
@@ -221,14 +235,13 @@ namespace galay::redis::protocol
             return std::unexpected(int_result.error());
         }
 
-        RedisReply result(RespType::Integer, *int_result);
-        return std::make_pair(*crlf_pos + 2, std::move(result));
+        *out = RedisReply(RespType::Integer, *int_result);
+        return *crlf_pos + 2;
     }
 
-    std::expected<std::pair<size_t, RedisReply>, ParseError>
-    RespParser::parseBulkString(const char* data, size_t length)
+    std::expected<size_t, ParseError>
+    RespParser::parseBulkStringFast(const char* data, size_t length, RedisReply* out)
     {
-        // 解析长度
         auto crlf_pos = findCRLF(data, length, 1);
         if (!crlf_pos) {
             return std::unexpected(ParseError::Incomplete);
@@ -240,39 +253,31 @@ namespace galay::redis::protocol
         }
 
         int64_t str_len = *len_result;
-
-        // 处理空值
         if (str_len == -1) {
-            RedisReply result(RespType::Null, std::monostate{});
-            return std::make_pair(*crlf_pos + 2, std::move(result));
+            *out = RedisReply(RespType::Null, std::monostate{});
+            return *crlf_pos + 2;
         }
-
         if (str_len < 0) {
             return std::unexpected(ParseError::InvalidLength);
         }
 
         size_t content_start = *crlf_pos + 2;
-        size_t content_end = content_start + str_len;
-
-        // 检查是否有足够的数据
+        size_t content_end = content_start + static_cast<size_t>(str_len);
         if (content_end + 2 > length) {
             return std::unexpected(ParseError::Incomplete);
         }
-
-        // 验证结尾的\r\n
         if (data[content_end] != '\r' || data[content_end + 1] != '\n') {
             return std::unexpected(ParseError::InvalidFormat);
         }
 
-        std::string value(data + content_start, str_len);
-        RedisReply result(RespType::BulkString, value);
-        return std::make_pair(content_end + 2, std::move(result));
+        std::string value(data + content_start, static_cast<size_t>(str_len));
+        *out = RedisReply(RespType::BulkString, std::move(value));
+        return content_end + 2;
     }
 
-    std::expected<std::pair<size_t, RedisReply>, ParseError>
-    RespParser::parseArray(const char* data, size_t length)
+    std::expected<size_t, ParseError>
+    RespParser::parseArrayFast(const char* data, size_t length, RedisReply* out)
     {
-        // 解析数组长度
         auto crlf_pos = findCRLF(data, length, 1);
         if (!crlf_pos) {
             return std::unexpected(ParseError::Incomplete);
@@ -284,41 +289,37 @@ namespace galay::redis::protocol
         }
 
         int64_t array_len = *len_result;
-
-        // 处理空数组
         if (array_len == -1) {
-            RedisReply result(RespType::Null, std::monostate{});
-            return std::make_pair(*crlf_pos + 2, std::move(result));
+            *out = RedisReply(RespType::Null, std::monostate{});
+            return *crlf_pos + 2;
         }
-
         if (array_len < 0) {
             return std::unexpected(ParseError::InvalidLength);
         }
 
         std::vector<RedisReply> elements;
-        elements.reserve(array_len);
+        elements.reserve(static_cast<size_t>(array_len));
         size_t offset = *crlf_pos + 2;
 
         for (int64_t i = 0; i < array_len; ++i) {
             if (offset >= length) {
                 return std::unexpected(ParseError::Incomplete);
             }
-
-            auto elem_result = parse(data + offset, length - offset);
-            if (!elem_result) {
-                return std::unexpected(elem_result.error());
+            RedisReply element;
+            auto elem_consumed = parseFast(data + offset, length - offset, &element);
+            if (!elem_consumed) {
+                return std::unexpected(elem_consumed.error());
             }
-
-            offset += elem_result->first;
-            elements.push_back(std::move(elem_result->second));
+            offset += elem_consumed.value();
+            elements.push_back(std::move(element));
         }
 
-        RedisReply result(RespType::Array, std::move(elements));
-        return std::make_pair(offset, std::move(result));
+        *out = RedisReply(RespType::Array, std::move(elements));
+        return offset;
     }
 
-    std::expected<std::pair<size_t, RedisReply>, ParseError>
-    RespParser::parseDouble(const char* data, size_t length)
+    std::expected<size_t, ParseError>
+    RespParser::parseDoubleFast(const char* data, size_t length, RedisReply* out)
     {
         auto crlf_pos = findCRLF(data, length, 1);
         if (!crlf_pos) {
@@ -327,19 +328,18 @@ namespace galay::redis::protocol
 
         std::string str(data + 1, *crlf_pos - 1);
         double value;
-
         try {
             value = std::stod(str);
         } catch (...) {
             return std::unexpected(ParseError::InvalidFormat);
         }
 
-        RedisReply result(RespType::Double, value);
-        return std::make_pair(*crlf_pos + 2, std::move(result));
+        *out = RedisReply(RespType::Double, value);
+        return *crlf_pos + 2;
     }
 
-    std::expected<std::pair<size_t, RedisReply>, ParseError>
-    RespParser::parseBoolean(const char* data, size_t length)
+    std::expected<size_t, ParseError>
+    RespParser::parseBooleanFast(const char* data, size_t length, RedisReply* out)
     {
         if (length < 4) {  // #t\r\n or #f\r\n
             return std::unexpected(ParseError::Incomplete);
@@ -353,19 +353,17 @@ namespace galay::redis::protocol
         } else {
             return std::unexpected(ParseError::InvalidFormat);
         }
-
         if (data[2] != '\r' || data[3] != '\n') {
             return std::unexpected(ParseError::InvalidFormat);
         }
 
-        RedisReply result(RespType::Boolean, value);
-        return std::make_pair(4, std::move(result));
+        *out = RedisReply(RespType::Boolean, value);
+        return 4;
     }
 
-    std::expected<std::pair<size_t, RedisReply>, ParseError>
-    RespParser::parseMap(const char* data, size_t length)
+    std::expected<size_t, ParseError>
+    RespParser::parseMapFast(const char* data, size_t length, RedisReply* out)
     {
-        // 解析映射大小
         auto crlf_pos = findCRLF(data, length, 1);
         if (!crlf_pos) {
             return std::unexpected(ParseError::Incomplete);
@@ -377,49 +375,44 @@ namespace galay::redis::protocol
         }
 
         int64_t map_size = *len_result;
-
         if (map_size < 0) {
             return std::unexpected(ParseError::InvalidLength);
         }
 
         std::vector<std::pair<RedisReply, RedisReply>> map_data;
-        map_data.reserve(map_size);
+        map_data.reserve(static_cast<size_t>(map_size));
         size_t offset = *crlf_pos + 2;
 
         for (int64_t i = 0; i < map_size; ++i) {
-            // 解析key
             if (offset >= length) {
                 return std::unexpected(ParseError::Incomplete);
             }
-
-            auto key_result = parse(data + offset, length - offset);
-            if (!key_result) {
-                return std::unexpected(key_result.error());
+            RedisReply key_reply;
+            auto key_consumed = parseFast(data + offset, length - offset, &key_reply);
+            if (!key_consumed) {
+                return std::unexpected(key_consumed.error());
             }
-            offset += key_result->first;
+            offset += key_consumed.value();
 
-            // 解析value
             if (offset >= length) {
                 return std::unexpected(ParseError::Incomplete);
             }
-
-            auto val_result = parse(data + offset, length - offset);
-            if (!val_result) {
-                return std::unexpected(val_result.error());
+            RedisReply value_reply;
+            auto value_consumed = parseFast(data + offset, length - offset, &value_reply);
+            if (!value_consumed) {
+                return std::unexpected(value_consumed.error());
             }
-            offset += val_result->first;
-
-            map_data.emplace_back(std::move(key_result->second), std::move(val_result->second));
+            offset += value_consumed.value();
+            map_data.emplace_back(std::move(key_reply), std::move(value_reply));
         }
 
-        RedisReply result(RespType::Map, std::move(map_data));
-        return std::make_pair(offset, std::move(result));
+        *out = RedisReply(RespType::Map, std::move(map_data));
+        return offset;
     }
 
-    std::expected<std::pair<size_t, RedisReply>, ParseError>
-    RespParser::parseSet(const char* data, size_t length)
+    std::expected<size_t, ParseError>
+    RespParser::parseSetFast(const char* data, size_t length, RedisReply* out)
     {
-        // 解析集合大小
         auto crlf_pos = findCRLF(data, length, 1);
         if (!crlf_pos) {
             return std::unexpected(ParseError::Incomplete);
@@ -431,31 +424,29 @@ namespace galay::redis::protocol
         }
 
         int64_t set_size = *len_result;
-
         if (set_size < 0) {
             return std::unexpected(ParseError::InvalidLength);
         }
 
         std::vector<RedisReply> set_data;
-        set_data.reserve(set_size);
+        set_data.reserve(static_cast<size_t>(set_size));
         size_t offset = *crlf_pos + 2;
 
         for (int64_t i = 0; i < set_size; ++i) {
             if (offset >= length) {
                 return std::unexpected(ParseError::Incomplete);
             }
-
-            auto elem_result = parse(data + offset, length - offset);
-            if (!elem_result) {
-                return std::unexpected(elem_result.error());
+            RedisReply element;
+            auto elem_consumed = parseFast(data + offset, length - offset, &element);
+            if (!elem_consumed) {
+                return std::unexpected(elem_consumed.error());
             }
-
-            offset += elem_result->first;
-            set_data.push_back(std::move(elem_result->second));
+            offset += elem_consumed.value();
+            set_data.push_back(std::move(element));
         }
 
-        RedisReply result(RespType::Set, std::move(set_data));
-        return std::make_pair(offset, std::move(result));
+        *out = RedisReply(RespType::Set, std::move(set_data));
+        return offset;
     }
 
     // RespEncoder实现
@@ -533,6 +524,27 @@ namespace galay::redis::protocol
             appendBulkString(result, part);
         }
         return result;
+    }
+
+    void RespEncoder::appendCommand(std::string& out, const std::vector<std::string>& cmd_parts) const
+    {
+        if (cmd_parts.empty()) {
+            out += "*0\r\n";
+            return;
+        }
+
+        size_t estimated = out.size() + 1 + decimalDigits(cmd_parts.size()) + 2;
+        for (const auto& part : cmd_parts) {
+            estimated += estimateBulkStringBytes(part.size());
+        }
+        out.reserve(estimated);
+
+        out.push_back('*');
+        out += std::to_string(cmd_parts.size());
+        out += "\r\n";
+        for (const auto& part : cmd_parts) {
+            appendBulkString(out, part);
+        }
     }
 
     std::string RespEncoder::encodeCommand(const std::string& cmd, std::initializer_list<std::string> args)
