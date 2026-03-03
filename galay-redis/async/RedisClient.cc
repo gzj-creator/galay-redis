@@ -269,7 +269,9 @@ namespace galay::redis
             cmd_parts.reserve(1 + m_args.size());
             cmd_parts.push_back(m_cmd);
             cmd_parts.insert(cmd_parts.end(), m_args.begin(), m_args.end());
-            m_encoded_cmd = m_client->m_encoder.encodeCommand(cmd_parts);
+            m_encoded_cmd.clear();
+            m_encoded_cmd.reserve(estimateRespCommandBytes(cmd_parts));
+            m_client->m_encoder.appendCommand(m_encoded_cmd, cmd_parts);
         }
 
         m_values.reserve(m_expected_replies);
@@ -366,11 +368,12 @@ namespace galay::redis
                 return false;
             }
 
-            auto parse_result = m_client->m_parser.parse(data, len);
+            protocol::RedisReply reply;
+            auto parse_result = m_client->m_parser.parseFast(data, len, &reply);
             if (parse_result) {
-                auto [consumed, value] = parse_result.value();
+                const auto consumed = parse_result.value();
                 m_client->m_ring_buffer.consume(consumed);
-                m_values.push_back(RedisValue(value));
+                m_values.emplace_back(std::move(reply));
                 continue;
             }
 
@@ -628,21 +631,21 @@ namespace galay::redis
                                                    std::vector<std::vector<std::string>> commands)
         : CustomAwaitable(client.m_socket.controller())
         , m_client(&client)
-        , m_commands(std::move(commands))
+        , m_expected_replies(commands.size())
         , m_state(State::Running)
         , m_send_awaitable(this)
         , m_recv_awaitable(this)
         , m_result(std::nullopt)
     {
-        m_values.reserve(m_commands.size());
+        m_values.reserve(m_expected_replies);
         size_t estimated_batch_size = 0;
-        for (const auto& cmd_parts : m_commands) {
+        for (const auto& cmd_parts : commands) {
             estimated_batch_size += estimateRespCommandBytes(cmd_parts);
         }
         m_encoded_batch.reserve(estimated_batch_size);
 
-        for (const auto& cmd_parts : m_commands) {
-            m_encoded_batch += m_client->m_encoder.encodeCommand(cmd_parts);
+        for (const auto& cmd_parts : commands) {
+            m_client->m_encoder.appendCommand(m_encoded_batch, cmd_parts);
         }
 
         m_send_awaitable.rebind(this);
@@ -674,7 +677,7 @@ namespace galay::redis
         m_waker = std::move(other.m_waker);
 
         m_client = other.m_client;
-        m_commands = std::move(other.m_commands);
+        m_expected_replies = other.m_expected_replies;
         m_encoded_batch = std::move(other.m_encoded_batch);
         m_parse_buffer = std::move(other.m_parse_buffer);
         m_values = std::move(other.m_values);
@@ -698,6 +701,7 @@ namespace galay::redis
     {
         m_state = State::Invalid;
         m_client = nullptr;
+        m_expected_replies = 0;
         m_tasks.clear();
         m_cursor = 0;
         m_internal_error.reset();
@@ -718,7 +722,7 @@ namespace galay::redis
 
     bool RedisPipelineAwaitable::parseResponsesFromRingBuffer()
     {
-        while (m_values.size() < m_commands.size()) {
+        while (m_values.size() < m_expected_replies) {
             auto read_iovecs = m_client->m_ring_buffer.getReadIovecs();
             if (read_iovecs.empty()) {
                 return false;
@@ -730,11 +734,12 @@ namespace galay::redis
                 return false;
             }
 
-            auto parse_result = m_client->m_parser.parse(data, len);
+            protocol::RedisReply reply;
+            auto parse_result = m_client->m_parser.parseFast(data, len, &reply);
             if (parse_result) {
-                auto [consumed, value] = parse_result.value();
+                const auto consumed = parse_result.value();
                 m_client->m_ring_buffer.consume(consumed);
-                m_values.push_back(RedisValue(value));
+                m_values.emplace_back(std::move(reply));
                 continue;
             }
 
@@ -1413,8 +1418,24 @@ namespace galay::redis
         return execute("ZSCORE", {key, member});
     }
 
-    RedisPipelineAwaitable RedisClient::pipeline(const std::vector<std::vector<std::string>>& commands) {
+    RedisPipelineAwaitable RedisClient::pipeline(const std::vector<std::vector<std::string>>& commands)
+    {
         return RedisPipelineAwaitable(*this, commands);
+    }
+
+    RedisPipelineAwaitable RedisClient::pipeline(std::vector<std::vector<std::string>>&& commands)
+    {
+        return RedisPipelineAwaitable(*this, std::move(commands));
+    }
+
+    RedisPipelineAwaitable RedisClient::batch(const std::vector<std::vector<std::string>>& commands)
+    {
+        return pipeline(commands);
+    }
+
+    RedisPipelineAwaitable RedisClient::batch(std::vector<std::vector<std::string>>&& commands)
+    {
+        return pipeline(std::move(commands));
     }
 
     // ======================== 连接方法 ========================

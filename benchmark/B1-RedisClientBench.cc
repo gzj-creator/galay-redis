@@ -50,7 +50,7 @@ void printUsage(const char* program)
 {
     std::cout << "Usage: " << program
               << " [-h host] [-p port] [-c clients] [-n operations] "
-                 "[-m normal|pipeline] [-b batch_size] [-q]"
+                 "[-m normal|normal-batch|pipeline] [-b batch_size] [-q]"
               << std::endl;
 }
 
@@ -113,12 +113,12 @@ bool parseArgs(int argc, char* argv[], BenchmarkOptions& options, bool& show_hel
         return false;
     }
 
-    if (options.mode != "normal" && options.mode != "pipeline") {
-        std::cerr << "Invalid mode: " << options.mode << ", expected normal|pipeline" << std::endl;
+    if (options.mode != "normal" && options.mode != "normal-batch" && options.mode != "pipeline") {
+        std::cerr << "Invalid mode: " << options.mode << ", expected normal|normal-batch|pipeline" << std::endl;
         return false;
     }
-    if (options.mode == "pipeline" && options.batch_size <= 0) {
-        std::cerr << "batch-size must be > 0 in pipeline mode" << std::endl;
+    if ((options.mode == "pipeline" || options.mode == "normal-batch") && options.batch_size <= 0) {
+        std::cerr << "batch-size must be > 0 in pipeline/normal-batch mode" << std::endl;
         return false;
     }
     return true;
@@ -249,7 +249,7 @@ Coroutine benchmarkPipeline(IOScheduler* scheduler, const BenchmarkOptions* opti
             commands.push_back({"SET", key, value});
         }
 
-        auto pipeline_result = co_await client.pipeline(commands).timeout(std::chrono::seconds(5));
+        auto pipeline_result = co_await client.pipeline(std::move(commands)).timeout(std::chrono::seconds(5));
         countBatchResult(
             pipeline_result,
             static_cast<std::int64_t>(current_batch),
@@ -269,6 +269,63 @@ Coroutine benchmarkPipeline(IOScheduler* scheduler, const BenchmarkOptions* opti
     if (options->verbose) {
         const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
         std::cout << "Client " << client_id << " finished pipeline mode in "
+                  << duration.count() << "ms" << std::endl;
+    }
+
+    markClientCompleted();
+}
+
+Coroutine benchmarkNormalBatch(IOScheduler* scheduler, const BenchmarkOptions* options, int client_id)
+{
+    auto client = RedisClientBuilder().scheduler(scheduler).build();
+    std::int64_t local_success = 0;
+    std::int64_t local_error = 0;
+    std::int64_t local_timeout = 0;
+
+    auto connect_result = co_await client.connect(options->host, options->port).timeout(std::chrono::seconds(5));
+    if (!connect_result) {
+        local_error += static_cast<std::int64_t>(options->operations) * 2;
+        g_success.fetch_add(local_success, std::memory_order_relaxed);
+        g_error.fetch_add(local_error, std::memory_order_relaxed);
+        g_timeout.fetch_add(local_timeout, std::memory_order_relaxed);
+        markClientCompleted();
+        co_return;
+    }
+
+    const auto start = std::chrono::high_resolution_clock::now();
+    int offset = 0;
+    while (offset < options->operations) {
+        const int current_batch = std::min(options->batch_size, options->operations - offset);
+        std::vector<std::vector<std::string>> commands;
+        commands.reserve(static_cast<size_t>(current_batch) * 2U);
+        for (int i = 0; i < current_batch; ++i) {
+            const int op_index = offset + i;
+            const std::string key = "bench:normal-batch:" + std::to_string(client_id) + ":" + std::to_string(op_index);
+            const std::string value = "value_" + std::to_string(op_index);
+            commands.push_back({"SET", key, value});
+            commands.push_back({"GET", key});
+        }
+
+        auto batch_result = co_await client.batch(std::move(commands)).timeout(std::chrono::seconds(5));
+        countBatchResult(
+            batch_result,
+            static_cast<std::int64_t>(current_batch) * 2,
+            local_success,
+            local_error,
+            local_timeout);
+        offset += current_batch;
+    }
+    const auto end = std::chrono::high_resolution_clock::now();
+
+    (void)co_await client.close();
+
+    g_success.fetch_add(local_success, std::memory_order_relaxed);
+    g_error.fetch_add(local_error, std::memory_order_relaxed);
+    g_timeout.fetch_add(local_timeout, std::memory_order_relaxed);
+
+    if (options->verbose) {
+        const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+        std::cout << "Client " << client_id << " finished normal-batch mode in "
                   << duration.count() << "ms" << std::endl;
     }
 
@@ -298,7 +355,7 @@ int main(int argc, char* argv[])
     std::cout << "Clients: " << options.clients << std::endl;
     std::cout << "Operations per client: " << options.operations << std::endl;
     std::cout << "Mode: " << options.mode << std::endl;
-    if (options.mode == "pipeline") {
+    if (options.mode == "pipeline" || options.mode == "normal-batch") {
         std::cout << "Batch size: " << options.batch_size << std::endl;
     }
     const std::int64_t planned_ops =
@@ -322,6 +379,8 @@ int main(int argc, char* argv[])
         }
         if (options.mode == "pipeline") {
             scheduler->spawn(benchmarkPipeline(scheduler, &options, i));
+        } else if (options.mode == "normal-batch") {
+            scheduler->spawn(benchmarkNormalBatch(scheduler, &options, i));
         } else {
             scheduler->spawn(benchmarkNormal(scheduler, &options, i));
         }

@@ -129,7 +129,7 @@ namespace galay::redis
                                        std::string cmd,
                                        std::vector<std::string> args,
                                        std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> waiter);
-        Coroutine refreshSentinelCoroutine(std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> waiter);
+        Coroutine refreshSentinelCoroutine();
 
         bool isRetryableConnectionError(const RedisError& error) const noexcept;
         RedisClient* chooseReadClient();
@@ -150,6 +150,8 @@ namespace galay::redis
         bool m_master_connected = false;
         size_t m_read_cursor = 0;
         size_t m_auto_retry_attempts = 2;
+        bool m_sentinel_refresh_inflight = false;
+        std::vector<std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>>> m_sentinel_refresh_waiters;
     };
 
     struct RedisClusterNodeAddress : RedisNodeAddress
@@ -253,7 +255,7 @@ namespace galay::redis
             int32_t port = 0;
         };
 
-        Coroutine refreshSlotsCoroutine(std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> waiter);
+        Coroutine refreshSlotsCoroutine();
         Coroutine executeAutoCoroutine(std::string routing_key,
                                        std::string cmd,
                                        std::vector<std::string> args,
@@ -280,6 +282,8 @@ namespace galay::redis
         std::chrono::milliseconds m_auto_refresh_interval{5000};
         std::chrono::steady_clock::time_point m_last_refresh_time{};
         bool m_slot_cache_ready = false;
+        bool m_slots_refresh_inflight = false;
+        std::vector<std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>>> m_slots_refresh_waiters;
     };
 
     inline galay::redis::RedisMasterSlaveClient galay::redis::RedisMasterSlaveClientBuilder::build() const

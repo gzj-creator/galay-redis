@@ -324,7 +324,7 @@ namespace galay::redis
         void setBufferOverflowError();
 
         RedisClient* m_client;
-        std::vector<std::vector<std::string>> m_commands;
+        size_t m_expected_replies = 0;
         std::string m_encoded_batch;
         std::string m_parse_buffer;
         std::vector<RedisValue> m_values;
@@ -520,6 +520,9 @@ namespace galay::redis
         // ======================== Pipeline批量操作 ========================
 
         RedisPipelineAwaitable pipeline(const std::vector<std::vector<std::string>>& commands);
+        RedisPipelineAwaitable pipeline(std::vector<std::vector<std::string>>&& commands);
+        RedisPipelineAwaitable batch(const std::vector<std::vector<std::string>>& commands);
+        RedisPipelineAwaitable batch(std::vector<std::vector<std::string>>&& commands);
 
         // ======================== 连接管理 ========================
 

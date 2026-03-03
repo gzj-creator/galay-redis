@@ -71,6 +71,20 @@ namespace galay::redis
             }
             return std::make_pair(host, port);
         }
+
+        RedisCommandResult cloneRedisCommandResult(const RedisCommandResult& result)
+        {
+            if (!result.has_value()) {
+                return std::unexpected(result.error());
+            }
+
+            std::vector<RedisValue> values;
+            values.reserve(result.value().size());
+            for (const auto& value : result.value()) {
+                values.emplace_back(value.getReply());
+            }
+            return values;
+        }
     }
 
     RedisCommandResultAwaitable::RedisCommandResultAwaitable(
@@ -178,7 +192,11 @@ namespace galay::redis
     RedisCommandResultAwaitable RedisMasterSlaveClient::refreshFromSentinel()
     {
         auto waiter = std::make_shared<galay::kernel::AsyncWaiter<RedisCommandResult>>();
-        m_scheduler->spawn(refreshSentinelCoroutine(waiter));
+        m_sentinel_refresh_waiters.push_back(waiter);
+        if (!m_sentinel_refresh_inflight) {
+            m_sentinel_refresh_inflight = true;
+            m_scheduler->spawn(refreshSentinelCoroutine());
+        }
         return RedisCommandResultAwaitable(waiter);
     }
 
@@ -362,14 +380,34 @@ namespace galay::redis
         return true;
     }
 
-    Coroutine RedisMasterSlaveClient::refreshSentinelCoroutine(
-        std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> waiter)
+    Coroutine RedisMasterSlaveClient::refreshSentinelCoroutine()
     {
+        auto notify_and_finish = [this](RedisCommandResult result) mutable {
+            auto waiters = std::move(m_sentinel_refresh_waiters);
+            m_sentinel_refresh_waiters.clear();
+            m_sentinel_refresh_inflight = false;
+            size_t last = waiters.size();
+            while (last > 0 && !waiters[last - 1]) {
+                --last;
+            }
+            for (size_t i = 0; i < last; ++i) {
+                if (!waiters[i]) {
+                    continue;
+                }
+                if (i + 1 == last) {
+                    waiters[i]->notify(std::move(result));
+                } else {
+                    auto cloned_result = cloneRedisCommandResult(result);
+                    waiters[i]->notify(std::move(cloned_result));
+                }
+            }
+        };
+
         RedisCommandResult final_result = std::unexpected(
             RedisError(REDIS_ERROR_TYPE_CONNECTION_ERROR, "No available sentinel"));
 
         if (m_sentinels.empty()) {
-            waiter->notify(std::move(final_result));
+            notify_and_finish(std::move(final_result));
             co_return;
         }
 
@@ -395,26 +433,26 @@ namespace galay::redis
         }
 
         if (!selected) {
-            waiter->notify(std::move(final_result));
+            notify_and_finish(std::move(final_result));
             co_return;
         }
 
         auto master_reply = co_await selected->client->execute("SENTINEL",
                                                                {"get-master-addr-by-name", m_sentinel_master_name});
         if (!master_reply) {
-            waiter->notify(std::unexpected(master_reply.error()));
+            notify_and_finish(std::unexpected(master_reply.error()));
             co_return;
         }
         if (!master_reply.value().has_value()) {
-            waiter->notify(std::unexpected(RedisError(REDIS_ERROR_TYPE_PARSE_ERROR,
-                                                      "Sentinel master reply missing")));
+            notify_and_finish(std::unexpected(RedisError(REDIS_ERROR_TYPE_PARSE_ERROR,
+                                                         "Sentinel master reply missing")));
             co_return;
         }
 
         RedisNodeAddress latest_master = m_master_address;
         if (!parseMasterAddressReply(master_reply.value().value(), &latest_master)) {
-            waiter->notify(std::unexpected(RedisError(REDIS_ERROR_TYPE_PARSE_ERROR,
-                                                      "Failed to parse sentinel master address")));
+            notify_and_finish(std::unexpected(RedisError(REDIS_ERROR_TYPE_PARSE_ERROR,
+                                                         "Failed to parse sentinel master address")));
             co_return;
         }
 
@@ -453,7 +491,9 @@ namespace galay::redis
             }
         }
 
-        waiter->notify(std::move(master_reply.value().value()));
+        auto& master_values = master_reply.value().value();
+        notify_and_finish(std::move(master_values));
+        co_return;
     }
 
     Coroutine RedisMasterSlaveClient::executeAutoCoroutine(
@@ -512,7 +552,8 @@ namespace galay::redis
 
             auto exec_result = co_await target->execute(cmd, args);
             if (exec_result && exec_result.value().has_value()) {
-                final_result = std::move(exec_result.value().value());
+                auto& exec_values = exec_result.value().value();
+                final_result = std::move(exec_values);
                 break;
             }
 
@@ -527,10 +568,8 @@ namespace galay::redis
                 isRetryableConnectionError(final_result.error()) &&
                 !m_sentinels.empty() &&
                 (attempt + 1) < max_attempts) {
-                auto refresh_waiter = std::make_shared<galay::kernel::AsyncWaiter<RedisCommandResult>>();
-                m_scheduler->spawn(refreshSentinelCoroutine(refresh_waiter));
-                auto refresh_result = co_await refresh_waiter->wait();
-                if (refresh_result && refresh_result.value()) {
+                auto refresh_result = co_await refreshFromSentinel();
+                if (refresh_result) {
                     continue;
                 }
             }
@@ -597,7 +636,11 @@ namespace galay::redis
     RedisCommandResultAwaitable RedisClusterClient::refreshSlots()
     {
         auto waiter = std::make_shared<galay::kernel::AsyncWaiter<RedisCommandResult>>();
-        m_scheduler->spawn(refreshSlotsCoroutine(waiter));
+        m_slots_refresh_waiters.push_back(waiter);
+        if (!m_slots_refresh_inflight) {
+            m_slots_refresh_inflight = true;
+            m_scheduler->spawn(refreshSlotsCoroutine());
+        }
         return RedisCommandResultAwaitable(waiter);
     }
 
@@ -870,11 +913,31 @@ namespace galay::redis
         return (now - m_last_refresh_time) >= m_auto_refresh_interval;
     }
 
-    Coroutine RedisClusterClient::refreshSlotsCoroutine(
-        std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> waiter)
+    Coroutine RedisClusterClient::refreshSlotsCoroutine()
     {
+        auto notify_and_finish = [this](RedisCommandResult result) mutable {
+            auto waiters = std::move(m_slots_refresh_waiters);
+            m_slots_refresh_waiters.clear();
+            m_slots_refresh_inflight = false;
+            size_t last = waiters.size();
+            while (last > 0 && !waiters[last - 1]) {
+                --last;
+            }
+            for (size_t i = 0; i < last; ++i) {
+                if (!waiters[i]) {
+                    continue;
+                }
+                if (i + 1 == last) {
+                    waiters[i]->notify(std::move(result));
+                } else {
+                    auto cloned_result = cloneRedisCommandResult(result);
+                    waiters[i]->notify(std::move(cloned_result));
+                }
+            }
+        };
+
         if (m_nodes.empty()) {
-            waiter->notify(std::unexpected(RedisError(REDIS_ERROR_TYPE_CONNECTION_ERROR, "No cluster node configured")));
+            notify_and_finish(std::unexpected(RedisError(REDIS_ERROR_TYPE_CONNECTION_ERROR, "No cluster node configured")));
             co_return;
         }
 
@@ -886,7 +949,7 @@ namespace galay::redis
             }
         }
         if (!seed) {
-            waiter->notify(std::unexpected(RedisError(REDIS_ERROR_TYPE_CONNECTION_ERROR, "No valid cluster client")));
+            notify_and_finish(std::unexpected(RedisError(REDIS_ERROR_TYPE_CONNECTION_ERROR, "No valid cluster client")));
             co_return;
         }
 
@@ -898,7 +961,7 @@ namespace galay::redis
                                                                  seed->address.db_index,
                                                                  seed->address.version);
             if (!connect_result) {
-                waiter->notify(std::unexpected(connect_result.error()));
+                notify_and_finish(std::unexpected(connect_result.error()));
                 co_return;
             }
             seed->connected = true;
@@ -906,23 +969,25 @@ namespace galay::redis
 
         auto slots_result = co_await seed->client->clusterSlots();
         if (!slots_result) {
-            waiter->notify(std::unexpected(slots_result.error()));
+            notify_and_finish(std::unexpected(slots_result.error()));
             co_return;
         }
         if (!slots_result.value().has_value()) {
-            waiter->notify(std::unexpected(RedisError(REDIS_ERROR_TYPE_PARSE_ERROR,
-                                                      "CLUSTER SLOTS returned empty payload")));
+            notify_and_finish(std::unexpected(RedisError(REDIS_ERROR_TYPE_PARSE_ERROR,
+                                                         "CLUSTER SLOTS returned empty payload")));
             co_return;
         }
 
         std::string parse_error;
-        auto values = std::move(slots_result.value().value());
+        auto& slots_values = slots_result.value().value();
+        auto values = std::move(slots_values);
         if (!applyClusterSlots(values, &parse_error)) {
-            waiter->notify(std::unexpected(RedisError(REDIS_ERROR_TYPE_PARSE_ERROR, parse_error)));
+            notify_and_finish(std::unexpected(RedisError(REDIS_ERROR_TYPE_PARSE_ERROR, parse_error)));
             co_return;
         }
 
-        waiter->notify(std::move(values));
+        notify_and_finish(std::move(values));
+        co_return;
     }
 
     Coroutine RedisClusterClient::executeAutoCoroutine(
@@ -938,10 +1003,8 @@ namespace galay::redis
         }
 
         if (shouldAutoRefresh()) {
-            auto refresh_waiter = std::make_shared<galay::kernel::AsyncWaiter<RedisCommandResult>>();
-            m_scheduler->spawn(refreshSlotsCoroutine(refresh_waiter));
-            auto refresh_result = co_await refresh_waiter->wait();
-            if (!refresh_result || !refresh_result.value()) {
+            auto refresh_result = co_await refreshSlots();
+            if (!refresh_result) {
                 // 刷新失败时，继续使用本地缓存做一次最佳努力路由
             }
         }
@@ -991,7 +1054,8 @@ namespace galay::redis
                 co_return;
             }
 
-            auto values = std::move(exec_result.value().value());
+            auto& exec_values = exec_result.value().value();
+            auto values = std::move(exec_values);
             const auto redirect = parseRedirect(values.front());
             if (!redirect.has_value()) {
                 waiter->notify(std::move(values));
@@ -1021,9 +1085,7 @@ namespace galay::redis
 
             if (redirect->type == RedirectInfo::Type::Moved) {
                 m_slot_owner[redirect->slot] = static_cast<int>(redirect_node - m_nodes.data());
-                auto refresh_waiter = std::make_shared<galay::kernel::AsyncWaiter<RedisCommandResult>>();
-                m_scheduler->spawn(refreshSlotsCoroutine(refresh_waiter));
-                auto refresh_result = co_await refresh_waiter->wait();
+                auto refresh_result = co_await refreshSlots();
                 (void)refresh_result;
                 continue;
             }
@@ -1040,7 +1102,8 @@ namespace galay::redis
                     co_return;
                 }
 
-                auto ask_values = std::move(asking_result.value().value());
+                auto& ask_values_ref = asking_result.value().value();
+                auto ask_values = std::move(ask_values_ref);
                 std::vector<RedisValue> final_values;
                 final_values.push_back(std::move(ask_values[1]));
                 const auto chained_redirect = parseRedirect(final_values.front());
