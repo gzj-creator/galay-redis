@@ -98,22 +98,29 @@ namespace galay::redis
     std::vector<RedisValue> RedisValue::toArray() const
     {
         if (!m_array_cached) {
-            m_cached_array.clear();
+            if (!m_cached_array) {
+                m_cached_array = std::make_unique<std::vector<RedisValue>>();
+            }
+            auto& cache = *m_cached_array;
+            cache.clear();
             if (m_reply.isArray()) {
                 const auto& arr = m_reply.asArray();
-                m_cached_array.reserve(arr.size());
+                cache.reserve(arr.size());
                 for (const auto& elem : arr) {
-                    // 使用拷贝构造，避免 const_cast
-                    m_cached_array.push_back(RedisValue(elem));
+                    cache.emplace_back(elem);
                 }
             }
             m_array_cached = true;
         }
         // 返回拷贝，保持接口不变
         std::vector<RedisValue> result;
-        result.reserve(m_cached_array.size());
-        for (const auto& elem : m_cached_array) {
-            result.push_back(RedisValue(elem.m_reply));
+        if (!m_cached_array) {
+            return result;
+        }
+
+        result.reserve(m_cached_array->size());
+        for (const auto& elem : *m_cached_array) {
+            result.emplace_back(elem.m_reply);
         }
         return result;
     }
@@ -146,12 +153,15 @@ namespace galay::redis
     std::map<std::string, RedisValue> RedisValue::toMap() const
     {
         if (!m_map_cached) {
-            m_cached_map.clear();
+            if (!m_cached_map) {
+                m_cached_map = std::make_unique<std::map<std::string, RedisValue>>();
+            }
+            auto& cache = *m_cached_map;
+            cache.clear();
             if (m_reply.isMap()) {
                 const auto& map_data = m_reply.asMap();
                 for (const auto& [key, value] : map_data) {
-                    // 使用拷贝构造，避免 const_cast
-                    m_cached_map.emplace(
+                    cache.emplace(
                         key.asString(),
                         RedisValue(value)
                     );
@@ -161,7 +171,11 @@ namespace galay::redis
         }
         // 返回拷贝，保持接口不变
         std::map<std::string, RedisValue> result;
-        for (const auto& [key, value] : m_cached_map) {
+        if (!m_cached_map) {
+            return result;
+        }
+
+        for (const auto& [key, value] : *m_cached_map) {
             result.emplace(key, RedisValue(value.m_reply));
         }
         return result;

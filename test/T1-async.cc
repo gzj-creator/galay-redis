@@ -11,6 +11,7 @@ Coroutine testAsyncRedisClient(IOScheduler* scheduler)
     std::cout << "Testing asynchronous RedisClient operations..." << std::endl;
 
     auto client = RedisClientBuilder().scheduler(scheduler).build();
+    RedisCommandBuilder builder;
 
     std::cout << "Connecting to Redis server..." << std::endl;
     auto connect_result = co_await client.connect("127.0.0.1", 6379);
@@ -21,7 +22,7 @@ Coroutine testAsyncRedisClient(IOScheduler* scheduler)
     std::cout << "Connected successfully!" << std::endl;
 
     std::cout << "Testing SET operation..." << std::endl;
-    auto set_result = co_await client.set("test_async_key", "test_async_value");
+    auto set_result = co_await client.command(builder.set("test_async_key", "test_async_value"));
     if (!set_result || !set_result.value()) {
         std::cerr << "SET failed: " << set_result.error().message() << std::endl;
         co_return;
@@ -29,7 +30,7 @@ Coroutine testAsyncRedisClient(IOScheduler* scheduler)
     std::cout << "SET operation successful" << std::endl;
 
     std::cout << "Testing GET operation..." << std::endl;
-    auto get_result = co_await client.get("test_async_key");
+    auto get_result = co_await client.command(builder.get("test_async_key"));
     if (!get_result || !get_result.value()) {
         std::cerr << "GET failed: " << get_result.error().message() << std::endl;
         co_return;
@@ -44,7 +45,7 @@ Coroutine testAsyncRedisClient(IOScheduler* scheduler)
     }
 
     std::cout << "Testing DEL operation..." << std::endl;
-    auto del_result = co_await client.del("test_async_key");
+    auto del_result = co_await client.command(builder.del("test_async_key"));
     if (!del_result || !del_result.value()) {
         std::cerr << "DEL failed: " << del_result.error().message() << std::endl;
         co_return;

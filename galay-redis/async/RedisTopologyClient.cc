@@ -85,6 +85,31 @@ namespace galay::redis
             }
             return values;
         }
+
+        RedisEncodedCommand encodeCommand(std::string_view cmd,
+                                                    const std::vector<std::string>& args,
+                                                    size_t expected_replies = 1)
+        {
+            RedisCommandBuilder builder;
+            return builder.command(cmd, args, expected_replies);
+        }
+
+        RedisEncodedCommand encodeCommand(std::string_view cmd,
+                                                    std::initializer_list<std::string> args,
+                                                    size_t expected_replies = 1)
+        {
+            return encodeCommand(cmd, std::vector<std::string>(args), expected_replies);
+        }
+
+        RedisConnectAwaitable connectToAddress(RedisClient* client, const RedisNodeAddress& address)
+        {
+            RedisConnectOptions options;
+            options.username = address.username;
+            options.password = address.password;
+            options.db_index = address.db_index;
+            options.version = address.version;
+            return client->connect(address.host, address.port, std::move(options));
+        }
     }
 
     RedisCommandResultAwaitable::RedisCommandResultAwaitable(
@@ -138,12 +163,7 @@ namespace galay::redis
         m_master_address = master;
         m_master_connected = false;
         auto* master_client = ensureMaster();
-        return master_client->connect(master.host,
-                                      master.port,
-                                      master.username,
-                                      master.password,
-                                      master.db_index,
-                                      master.version);
+        return connectToAddress(master_client, master);
     }
 
     RedisConnectAwaitable RedisMasterSlaveClient::addReplica(const RedisNodeAddress& replica)
@@ -153,12 +173,7 @@ namespace galay::redis
         m_replicas.push_back(std::move(client));
         m_replica_addresses.push_back(replica);
         m_replica_connected.push_back(false);
-        return raw_client->connect(replica.host,
-                                   replica.port,
-                                   replica.username,
-                                   replica.password,
-                                   replica.db_index,
-                                   replica.version);
+        return connectToAddress(raw_client, replica);
     }
 
     RedisConnectAwaitable RedisMasterSlaveClient::addSentinel(const RedisNodeAddress& sentinel)
@@ -169,12 +184,7 @@ namespace galay::redis
         node.connected = false;
         auto* raw_client = node.client.get();
         m_sentinels.push_back(std::move(node));
-        return raw_client->connect(sentinel.host,
-                                   sentinel.port,
-                                   sentinel.username,
-                                   sentinel.password,
-                                   sentinel.db_index,
-                                   sentinel.version);
+        return connectToAddress(raw_client, sentinel);
     }
 
     void RedisMasterSlaveClient::setSentinelMasterName(std::string master_name)
@@ -200,34 +210,24 @@ namespace galay::redis
         return RedisCommandResultAwaitable(waiter);
     }
 
-    RedisCommandResultAwaitable RedisMasterSlaveClient::executeWriteAuto(
+    RedisCommandResultAwaitable RedisMasterSlaveClient::execute(
         const std::string& cmd,
-        const std::vector<std::string>& args)
+        const std::vector<std::string>& args,
+        bool prefer_read,
+        bool auto_retry)
     {
         auto waiter = std::make_shared<galay::kernel::AsyncWaiter<RedisCommandResult>>();
-        m_scheduler->spawn(executeAutoCoroutine(false, cmd, args, waiter));
+        const size_t max_attempts = auto_retry ? std::max<size_t>(1, m_auto_retry_attempts) : size_t(1);
+        m_scheduler->spawn(executeAutoCoroutine(prefer_read, cmd, args, max_attempts, waiter));
         return RedisCommandResultAwaitable(waiter);
     }
 
-    RedisCommandResultAwaitable RedisMasterSlaveClient::executeReadAuto(
-        const std::string& cmd,
-        const std::vector<std::string>& args)
+    RedisPipelineAwaitable RedisMasterSlaveClient::batch(
+        std::span<const RedisCommandView> commands,
+        bool prefer_read)
     {
-        auto waiter = std::make_shared<galay::kernel::AsyncWaiter<RedisCommandResult>>();
-        m_scheduler->spawn(executeAutoCoroutine(true, cmd, args, waiter));
-        return RedisCommandResultAwaitable(waiter);
-    }
-
-    RedisClientAwaitable RedisMasterSlaveClient::executeWrite(const std::string& cmd,
-                                                               const std::vector<std::string>& args)
-    {
-        return ensureMaster()->execute(cmd, args);
-    }
-
-    RedisPipelineAwaitable RedisMasterSlaveClient::pipelineWrite(
-        const std::vector<std::vector<std::string>>& commands)
-    {
-        return ensureMaster()->pipeline(commands);
+        RedisClient* client = prefer_read ? chooseReadClient() : ensureMaster();
+        return client->batch(commands);
     }
 
     RedisClient* RedisMasterSlaveClient::chooseReadClient()
@@ -247,18 +247,6 @@ namespace galay::redis
         }
 
         return ensureMaster();
-    }
-
-    RedisClientAwaitable RedisMasterSlaveClient::executeRead(const std::string& cmd,
-                                                              const std::vector<std::string>& args)
-    {
-        return chooseReadClient()->execute(cmd, args);
-    }
-
-    RedisPipelineAwaitable RedisMasterSlaveClient::pipelineRead(
-        const std::vector<std::vector<std::string>>& commands)
-    {
-        return chooseReadClient()->pipeline(commands);
     }
 
     RedisClient& RedisMasterSlaveClient::master()
@@ -417,12 +405,7 @@ namespace galay::redis
                 continue;
             }
             if (!sentinel.connected) {
-                auto connect_result = co_await sentinel.client->connect(sentinel.address.host,
-                                                                        sentinel.address.port,
-                                                                        sentinel.address.username,
-                                                                        sentinel.address.password,
-                                                                        sentinel.address.db_index,
-                                                                        sentinel.address.version);
+                auto connect_result = co_await connectToAddress(sentinel.client.get(), sentinel.address);
                 if (!connect_result) {
                     continue;
                 }
@@ -437,8 +420,8 @@ namespace galay::redis
             co_return;
         }
 
-        auto master_reply = co_await selected->client->execute("SENTINEL",
-                                                               {"get-master-addr-by-name", m_sentinel_master_name});
+        auto master_reply = co_await selected->client->command(
+            encodeCommand("SENTINEL", {"get-master-addr-by-name", m_sentinel_master_name}));
         if (!master_reply) {
             notify_and_finish(std::unexpected(master_reply.error()));
             co_return;
@@ -467,8 +450,8 @@ namespace galay::redis
             m_master = std::make_unique<RedisClient>(m_scheduler, m_config);
         }
 
-        auto replicas_reply = co_await selected->client->execute("SENTINEL",
-                                                                 {"replicas", m_sentinel_master_name});
+        auto replicas_reply = co_await selected->client->command(
+            encodeCommand("SENTINEL", {"replicas", m_sentinel_master_name}));
         if (replicas_reply && replicas_reply.value().has_value()) {
             std::vector<RedisNodeAddress> parsed_replicas;
             if (parseReplicaListReply(replicas_reply.value().value(), &parsed_replicas)) {
@@ -479,12 +462,7 @@ namespace galay::redis
                 m_replica_connected.reserve(m_replica_addresses.size());
                 for (const auto& addr : m_replica_addresses) {
                     auto client = std::make_unique<RedisClient>(m_scheduler, m_config);
-                    auto connect_res = co_await client->connect(addr.host,
-                                                                addr.port,
-                                                                addr.username,
-                                                                addr.password,
-                                                                addr.db_index,
-                                                                addr.version);
+                    auto connect_res = co_await connectToAddress(client.get(), addr);
                     m_replica_connected.push_back(connect_res.has_value());
                     m_replicas.push_back(std::move(client));
                 }
@@ -500,12 +478,13 @@ namespace galay::redis
         bool prefer_read,
         std::string cmd,
         std::vector<std::string> args,
+        size_t max_attempts,
         std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> waiter)
     {
         RedisCommandResult final_result = std::unexpected(
             RedisError(REDIS_ERROR_TYPE_CONNECTION_ERROR, "Command execution not started"));
 
-        const size_t max_attempts = std::max<size_t>(1, m_auto_retry_attempts);
+        max_attempts = std::max<size_t>(1, max_attempts);
         for (size_t attempt = 0; attempt < max_attempts; ++attempt) {
             RedisClient* target = prefer_read ? chooseReadClient() : ensureMaster();
             bool is_master_target = (target == ensureMaster());
@@ -520,12 +499,7 @@ namespace galay::redis
             }
 
             if (is_master_target && !m_master_connected) {
-                auto connect_result = co_await ensureMaster()->connect(m_master_address.host,
-                                                                       m_master_address.port,
-                                                                       m_master_address.username,
-                                                                       m_master_address.password,
-                                                                       m_master_address.db_index,
-                                                                       m_master_address.version);
+                auto connect_result = co_await connectToAddress(ensureMaster(), m_master_address);
                 if (!connect_result) {
                     final_result = std::unexpected(connect_result.error());
                 } else {
@@ -537,12 +511,7 @@ namespace galay::redis
                        replica_index < m_replica_connected.size() &&
                        !m_replica_connected[replica_index]) {
                 const auto& addr = m_replica_addresses[replica_index];
-                auto connect_result = co_await target->connect(addr.host,
-                                                               addr.port,
-                                                               addr.username,
-                                                               addr.password,
-                                                               addr.db_index,
-                                                               addr.version);
+                auto connect_result = co_await connectToAddress(target, addr);
                 if (!connect_result) {
                     final_result = std::unexpected(connect_result.error());
                 } else {
@@ -550,7 +519,7 @@ namespace galay::redis
                 }
             }
 
-            auto exec_result = co_await target->execute(cmd, args);
+            auto exec_result = co_await target->command(encodeCommand(cmd, args));
             if (exec_result && exec_result.value().has_value()) {
                 auto& exec_values = exec_result.value().value();
                 final_result = std::move(exec_values);
@@ -602,12 +571,7 @@ namespace galay::redis
         }
         m_slot_cache_ready = true;
 
-        return raw_client->connect(node.host,
-                                   node.port,
-                                   node.username,
-                                   node.password,
-                                   node.db_index,
-                                   node.version);
+        return connectToAddress(raw_client, node);
     }
 
     void RedisClusterClient::setSlotRange(size_t node_index, uint16_t slot_start, uint16_t slot_end)
@@ -644,72 +608,46 @@ namespace galay::redis
         return RedisCommandResultAwaitable(waiter);
     }
 
-    RedisCommandResultAwaitable RedisClusterClient::executeAuto(const std::string& cmd,
-                                                                const std::vector<std::string>& args)
+    RedisCommandResultAwaitable RedisClusterClient::execute(
+        const std::string& cmd,
+        const std::vector<std::string>& args,
+        std::string routing_key,
+        bool auto_retry)
     {
         auto waiter = std::make_shared<galay::kernel::AsyncWaiter<RedisCommandResult>>();
-        const std::string routing_key = args.empty() ? std::string() : args.front();
-        m_scheduler->spawn(executeAutoCoroutine(routing_key, cmd, args, !routing_key.empty(), waiter));
+        if (routing_key.empty() && !args.empty()) {
+            routing_key = args.front();
+        }
+        const bool force_key_routing = !routing_key.empty();
+        const size_t max_attempts = auto_retry ? size_t(5) : size_t(1);
+        m_scheduler->spawn(
+            executeAutoCoroutine(routing_key,
+                                 cmd,
+                                 args,
+                                 force_key_routing,
+                                 auto_retry,
+                                 max_attempts,
+                                 waiter));
         return RedisCommandResultAwaitable(waiter);
     }
 
-    RedisCommandResultAwaitable RedisClusterClient::executeByKeyAuto(const std::string& routing_key,
-                                                                     const std::string& cmd,
-                                                                     const std::vector<std::string>& args)
+    RedisPipelineAwaitable RedisClusterClient::batch(
+        std::span<const RedisCommandView> commands,
+        std::string routing_key)
     {
-        auto waiter = std::make_shared<galay::kernel::AsyncWaiter<RedisCommandResult>>();
-        m_scheduler->spawn(executeAutoCoroutine(routing_key, cmd, args, true, waiter));
-        return RedisCommandResultAwaitable(waiter);
-    }
-
-    RedisClientAwaitable RedisClusterClient::execute(const std::string& cmd,
-                                                      const std::vector<std::string>& args)
-    {
-        RedisClient* node = nullptr;
-        if (!args.empty()) {
-            node = chooseNodeByKey(args.front());
-        } else {
-            node = chooseNodeBySlot(0);
+        if (routing_key.empty() && !commands.empty() && !commands.front().args.empty()) {
+            routing_key.assign(commands.front().args.front());
         }
 
+        RedisClient* node = routing_key.empty() ? chooseNodeBySlot(0) : chooseNodeByKey(routing_key);
         if (!node) {
             if (!m_fallback_client) {
                 m_fallback_client = std::make_unique<RedisClient>(m_scheduler, m_config);
             }
-            return m_fallback_client->execute(cmd, args);
+            return m_fallback_client->batch(commands);
         }
 
-        return node->execute(cmd, args);
-    }
-
-    RedisClientAwaitable RedisClusterClient::executeByKey(const std::string& routing_key,
-                                                           const std::string& cmd,
-                                                           const std::vector<std::string>& args)
-    {
-        auto* node = chooseNodeByKey(routing_key);
-        if (!node) {
-            if (!m_fallback_client) {
-                m_fallback_client = std::make_unique<RedisClient>(m_scheduler, m_config);
-            }
-            return m_fallback_client->execute(cmd, args);
-        }
-
-        return node->execute(cmd, args);
-    }
-
-    RedisPipelineAwaitable RedisClusterClient::pipelineByKey(
-        const std::string& routing_key,
-        const std::vector<std::vector<std::string>>& commands)
-    {
-        auto* node = chooseNodeByKey(routing_key);
-        if (!node) {
-            if (!m_fallback_client) {
-                m_fallback_client = std::make_unique<RedisClient>(m_scheduler, m_config);
-            }
-            return m_fallback_client->pipeline(commands);
-        }
-
-        return node->pipeline(commands);
+        return node->batch(commands);
     }
 
     uint16_t RedisClusterClient::keySlot(const std::string& key) const
@@ -954,12 +892,7 @@ namespace galay::redis
         }
 
         if (!seed->connected) {
-            auto connect_result = co_await seed->client->connect(seed->address.host,
-                                                                 seed->address.port,
-                                                                 seed->address.username,
-                                                                 seed->address.password,
-                                                                 seed->address.db_index,
-                                                                 seed->address.version);
+            auto connect_result = co_await connectToAddress(seed->client.get(), seed->address);
             if (!connect_result) {
                 notify_and_finish(std::unexpected(connect_result.error()));
                 co_return;
@@ -967,7 +900,8 @@ namespace galay::redis
             seed->connected = true;
         }
 
-        auto slots_result = co_await seed->client->clusterSlots();
+        RedisCommandBuilder command_builder;
+        auto slots_result = co_await seed->client->command(command_builder.clusterSlots());
         if (!slots_result) {
             notify_and_finish(std::unexpected(slots_result.error()));
             co_return;
@@ -995,6 +929,8 @@ namespace galay::redis
         std::string cmd,
         std::vector<std::string> args,
         bool force_key_routing,
+        bool allow_auto_refresh,
+        size_t max_attempts,
         std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> waiter)
     {
         if (m_nodes.empty()) {
@@ -1002,7 +938,7 @@ namespace galay::redis
             co_return;
         }
 
-        if (shouldAutoRefresh()) {
+        if (allow_auto_refresh && shouldAutoRefresh()) {
             auto refresh_result = co_await refreshSlots();
             if (!refresh_result) {
                 // 刷新失败时，继续使用本地缓存做一次最佳努力路由
@@ -1014,7 +950,8 @@ namespace galay::redis
         cmd_parts.push_back(cmd);
         cmd_parts.insert(cmd_parts.end(), args.begin(), args.end());
 
-        for (int attempt = 0; attempt < 5; ++attempt) {
+        max_attempts = std::max<size_t>(1, max_attempts);
+        for (size_t attempt = 0; attempt < max_attempts; ++attempt) {
             ClusterNode* target = nullptr;
             if (force_key_routing && !routing_key.empty()) {
                 target = chooseNodeHandleByKey(routing_key);
@@ -1030,12 +967,7 @@ namespace galay::redis
             }
 
             if (!target->connected) {
-                auto connect_result = co_await target->client->connect(target->address.host,
-                                                                       target->address.port,
-                                                                       target->address.username,
-                                                                       target->address.password,
-                                                                       target->address.db_index,
-                                                                       target->address.version);
+                auto connect_result = co_await connectToAddress(target->client.get(), target->address);
                 if (!connect_result) {
                     waiter->notify(std::unexpected(connect_result.error()));
                     co_return;
@@ -1043,7 +975,7 @@ namespace galay::redis
                 target->connected = true;
             }
 
-            auto exec_result = co_await target->client->execute(cmd, args);
+            auto exec_result = co_await target->client->command(encodeCommand(cmd, args));
             if (!exec_result) {
                 waiter->notify(std::unexpected(exec_result.error()));
                 co_return;
@@ -1070,12 +1002,8 @@ namespace galay::redis
             }
 
             if (!redirect_node->connected) {
-                auto connect_result = co_await redirect_node->client->connect(redirect_node->address.host,
-                                                                              redirect_node->address.port,
-                                                                              redirect_node->address.username,
-                                                                              redirect_node->address.password,
-                                                                              redirect_node->address.db_index,
-                                                                              redirect_node->address.version);
+                auto connect_result = co_await connectToAddress(redirect_node->client.get(),
+                                                                redirect_node->address);
                 if (!connect_result) {
                     waiter->notify(std::unexpected(connect_result.error()));
                     co_return;
@@ -1085,13 +1013,26 @@ namespace galay::redis
 
             if (redirect->type == RedirectInfo::Type::Moved) {
                 m_slot_owner[redirect->slot] = static_cast<int>(redirect_node - m_nodes.data());
-                auto refresh_result = co_await refreshSlots();
-                (void)refresh_result;
+                if (allow_auto_refresh) {
+                    auto refresh_result = co_await refreshSlots();
+                    (void)refresh_result;
+                }
                 continue;
             }
 
             if (redirect->type == RedirectInfo::Type::Ask) {
-                auto asking_result = co_await redirect_node->client->pipeline({{"ASKING"}, cmd_parts});
+                RedisCommandBuilder asking_builder;
+                asking_builder.reserve(2, 1 + cmd_parts.size(), 64);
+                asking_builder.append("ASKING");
+
+                std::vector<std::string_view> cmd_args;
+                cmd_args.reserve(cmd_parts.size() > 1 ? cmd_parts.size() - 1 : 0);
+                for (size_t i = 1; i < cmd_parts.size(); ++i) {
+                    cmd_args.emplace_back(cmd_parts[i]);
+                }
+                asking_builder.append(cmd_parts[0], std::span<const std::string_view>(cmd_args));
+
+                auto asking_result = co_await redirect_node->client->batch(asking_builder.commands());
                 if (!asking_result) {
                     waiter->notify(std::unexpected(asking_result.error()));
                     co_return;

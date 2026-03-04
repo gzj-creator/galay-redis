@@ -27,7 +27,7 @@ namespace galay::redis
          * @brief 读缓冲区大小
          * 推荐范围：8192-65536
          */
-        size_t buffer_size = 8192;
+        size_t buffer_size = 65536;
 
         /**
          * @brief 检查发送超时是否启用

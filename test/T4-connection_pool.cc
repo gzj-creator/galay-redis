@@ -27,6 +27,7 @@ Coroutine testBasicConnectionPool(IOScheduler* scheduler)
 
     // 创建连接池
     RedisConnectionPool pool(scheduler, config);
+    RedisCommandBuilder command_builder;
 
     // 初始化连接池
     std::cout << "1. Initializing connection pool..." << std::endl;
@@ -65,7 +66,7 @@ Coroutine testBasicConnectionPool(IOScheduler* scheduler)
     }
     std::cout << "   [PASSED] Connection bootstrap succeeded" << std::endl;
 
-    auto ping_result = co_await redis_client->ping();
+    auto ping_result = co_await redis_client->command(command_builder.ping());
     if (ping_result && ping_result.value()) {
         auto& values = ping_result.value().value();
         if (!values.empty() && values[0].isString()) {
@@ -105,6 +106,7 @@ Coroutine testScopedConnection(IOScheduler* scheduler)
 
     auto config = ConnectionPoolConfig::create("127.0.0.1", 6379, 2, 5);
     RedisConnectionPool pool(scheduler, config);
+    RedisCommandBuilder command_builder;
 
     auto init_result = co_await pool.initialize();
     if (!init_result) {
@@ -125,7 +127,7 @@ Coroutine testScopedConnection(IOScheduler* scheduler)
         std::cout << "   [INFO] Connection acquired (scoped)" << std::endl;
 
         // 使用连接
-        auto result = co_await scoped_conn->set("test_key", "test_value");
+        auto result = co_await scoped_conn->command(command_builder.set("test_key", "test_value"));
         if (result && result.value()) {
             std::cout << "   [PASSED] SET command succeeded" << std::endl;
         }
@@ -158,6 +160,7 @@ Coroutine testConcurrentAcquire(IOScheduler* scheduler,
                                 std::shared_ptr<AsyncWaiter<void>> done_waiter)
 {
     (void)scheduler;
+    RedisCommandBuilder command_builder;
     for (int i = 0; i < 5; ++i) {
         auto conn_result = co_await pool.acquire();
         if (!conn_result) {
@@ -171,7 +174,7 @@ Coroutine testConcurrentAcquire(IOScheduler* scheduler,
 
         // 执行一些操作
         std::string key = "client_" + std::to_string(client_id) + "_key_" + std::to_string(i);
-        auto result = co_await conn->get()->set(key, "value");
+        auto result = co_await conn->get()->command(command_builder.set(key, "value"));
 
         // 模拟一些工作（使用简单的循环代替 sleep）
         for (int j = 0; j < 1000; ++j) {
@@ -366,6 +369,7 @@ Coroutine testStatistics(IOScheduler* scheduler)
 
     auto config = ConnectionPoolConfig::create("127.0.0.1", 6379, 2, 5);
     RedisConnectionPool pool(scheduler, config);
+    RedisCommandBuilder command_builder;
 
     auto init_result = co_await pool.initialize();
     if (!init_result) {
@@ -380,7 +384,7 @@ Coroutine testStatistics(IOScheduler* scheduler)
         auto conn_result = co_await pool.acquire();
         if (conn_result) {
             auto conn = conn_result.value();
-            co_await conn->get()->ping();
+            co_await conn->get()->command(command_builder.ping());
             pool.release(conn);
         }
     }

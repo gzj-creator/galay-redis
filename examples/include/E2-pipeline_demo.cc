@@ -2,6 +2,7 @@
 #include "galay-redis/async/RedisClient.h"
 #include <galay-kernel/kernel/Runtime.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -64,6 +65,7 @@ Coroutine runDemo(
     int batch_size)
 {
     auto client = RedisClientBuilder().scheduler(scheduler).build();
+    RedisCommandBuilder command_builder;
 
     auto connect_result = co_await client.connect(host, port).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
@@ -73,15 +75,15 @@ Coroutine runDemo(
         co_return;
     }
 
-    std::vector<std::vector<std::string>> commands;
-    commands.reserve(static_cast<size_t>(batch_size));
+    RedisCommandBuilder commands;
+    commands.reserve(static_cast<size_t>(batch_size), static_cast<size_t>(batch_size) * 2U, static_cast<size_t>(batch_size) * 96U);
     for (int i = 0; i < batch_size; ++i) {
         const std::string key = key_prefix + std::to_string(i);
         const std::string value = "value_" + std::to_string(i);
-        commands.push_back({"SET", key, value});
+        commands.append("SET", std::array<std::string_view, 2>{key, value});
     }
 
-    auto pipeline_result = co_await client.pipeline(commands).timeout(
+    auto pipeline_result = co_await client.batch(commands.commands()).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
     if (!pipeline_result) {
         std::cerr << "Pipeline failed: " << pipeline_result.error().message() << std::endl;
@@ -99,7 +101,7 @@ Coroutine runDemo(
     std::cout << "E2 pipeline responses: " << pipeline_result.value().value().size() << std::endl;
 
     const std::string sample_key = key_prefix + "0";
-    auto sample_result = co_await client.get(sample_key).timeout(
+    auto sample_result = co_await client.command(command_builder.get(sample_key)).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
     if (!sample_result || !sample_result.value()) {
         std::cerr << "Sample GET failed for " << sample_key << std::endl;
@@ -112,12 +114,13 @@ Coroutine runDemo(
         std::cout << "E2 sample value: " << sample_values[0].toString() << std::endl;
     }
 
-    std::vector<std::vector<std::string>> cleanup_commands;
-    cleanup_commands.reserve(static_cast<size_t>(batch_size));
+    RedisCommandBuilder cleanup_commands;
+    cleanup_commands.reserve(static_cast<size_t>(batch_size), static_cast<size_t>(batch_size), static_cast<size_t>(batch_size) * 64U);
     for (int i = 0; i < batch_size; ++i) {
-        cleanup_commands.push_back({"DEL", key_prefix + std::to_string(i)});
+        const std::string key = key_prefix + std::to_string(i);
+        cleanup_commands.append("DEL", std::array<std::string_view, 1>{key});
     }
-    auto cleanup_result = co_await client.pipeline(cleanup_commands).timeout(
+    auto cleanup_result = co_await client.batch(cleanup_commands.commands()).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
     if (!cleanup_result) {
         std::cerr << "Cleanup pipeline failed: " << cleanup_result.error().message() << std::endl;

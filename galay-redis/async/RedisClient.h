@@ -6,7 +6,6 @@
 #include <galay-kernel/kernel/Coroutine.h>
 #include <galay-kernel/kernel/Timeout.hpp>
 #include <galay-kernel/common/Host.hpp>
-#include <galay-kernel/common/Buffer.h>
 #include <galay-kernel/common/Error.h>
 #include <memory>
 #include <string>
@@ -15,11 +14,16 @@
 #include <vector>
 #include <coroutine>
 #include <utility>
+#include <span>
+#include <array>
+#include <string_view>
 #include "galay-redis/base/RedisError.h"
 #include "galay-redis/base/RedisLog.h"
 #include "galay-redis/base/RedisValue.h"
 #include "galay-redis/protocol/RedisProtocol.h"
+#include "galay-redis/protocol/Builder.h"
 #include "AsyncRedisConfig.h"
+#include "RedisBufferProvider.h"
 
 namespace galay::redis
 {
@@ -29,16 +33,26 @@ namespace galay::redis
     using galay::kernel::Host;
     using galay::kernel::IOError;
     using galay::kernel::IPType;
-    using galay::kernel::RingBuffer;
     using galay::kernel::CustomAwaitable;
     using galay::kernel::SendAwaitable;
     using galay::kernel::RecvAwaitable;
     using galay::kernel::ReadvAwaitable;
+    using galay::kernel::ReadvIOContext;
+    using galay::kernel::WritevIOContext;
+    using galay::kernel::WritevAwaitable;
     using galay::kernel::ConnectAwaitable;
 
     // 类型别名
     using RedisResult = std::expected<std::vector<RedisValue>, RedisError>;
     using RedisVoidResult = std::expected<void, RedisError>;
+
+    struct RedisConnectOptions
+    {
+        std::string username;
+        std::string password;
+        int32_t db_index = 0;
+        int version = 2;
+    };
 
     // 前向声明
     class RedisClient;
@@ -76,6 +90,12 @@ namespace galay::redis
             return *this;
         }
 
+        RedisClientBuilder& bufferProvider(std::shared_ptr<RedisBufferProvider> provider)
+        {
+            m_buffer_provider = std::move(provider);
+            return *this;
+        }
+
         RedisClient build() const;
 
         AsyncRedisConfig buildConfig() const
@@ -86,6 +106,7 @@ namespace galay::redis
     private:
         IOScheduler* m_scheduler = nullptr;
         AsyncRedisConfig m_config = AsyncRedisConfig::noTimeout();
+        std::shared_ptr<RedisBufferProvider> m_buffer_provider;
     };
 
     /**
@@ -98,14 +119,15 @@ namespace galay::redis
      *
      * @note 支持超时设置：
      * @code
-     * auto result = co_await client.get("key").timeout(std::chrono::seconds(5));
+     * RedisCommandBuilder builder;
+     * auto result = co_await client.command(builder.get("key")).timeout(std::chrono::seconds(5));
      * @endcode
      */
     class RedisClientAwaitable : public galay::kernel::CustomAwaitable,
                                  public galay::kernel::TimeoutSupport<RedisClientAwaitable>
     {
     public:
-        class ProtocolSendAwaitable : public SendAwaitable
+        class ProtocolSendAwaitable : public WritevIOContext
         {
         public:
             explicit ProtocolSendAwaitable(RedisClientAwaitable* owner);
@@ -119,10 +141,13 @@ namespace galay::redis
             void rebind(RedisClientAwaitable* owner);
 
         private:
+            int pendingIovCount();
+            bool advanceAfterWrite(size_t sent_bytes);
+
             RedisClientAwaitable* m_owner;
         };
 
-        class ProtocolRecvAwaitable : public RecvAwaitable
+        class ProtocolRecvAwaitable : public ReadvIOContext
         {
         public:
             explicit ProtocolRecvAwaitable(RedisClientAwaitable* owner);
@@ -144,13 +169,11 @@ namespace galay::redis
         /**
          * @brief 构造函数
          * @param client RedisClient引用
-         * @param cmd 命令名称
-         * @param args 命令参数
+         * @param encoded_command 已编码的RESP命令字符串
          * @param expected_replies 期望的响应数量（Pipeline时>1）
          */
         RedisClientAwaitable(RedisClient& client,
-                            std::string cmd,
-                            std::vector<std::string> args,
+                            std::string encoded_command,
                             size_t expected_replies = 1,
                             bool recv_only = false);
 
@@ -206,8 +229,6 @@ namespace galay::redis
         void setBufferOverflowError();
 
         RedisClient* m_client;
-        std::string m_cmd;
-        std::vector<std::string> m_args;
         std::string m_encoded_cmd;
         std::string m_parse_buffer;
         size_t m_expected_replies;
@@ -230,14 +251,16 @@ namespace galay::redis
      *
      * @note 支持超时设置：
      * @code
-     * auto result = co_await client.pipeline(commands).timeout(std::chrono::seconds(10));
+     * RedisCommandBuilder builder;
+     * builder.append("SET", std::array<std::string_view, 2>{"k", "v"});
+     * auto result = co_await client.batch(builder.commands()).timeout(std::chrono::seconds(10));
      * @endcode
      */
     class RedisPipelineAwaitable : public galay::kernel::CustomAwaitable,
                                    public galay::kernel::TimeoutSupport<RedisPipelineAwaitable>
     {
     public:
-        class ProtocolSendAwaitable : public SendAwaitable
+        class ProtocolSendAwaitable : public WritevIOContext
         {
         public:
             explicit ProtocolSendAwaitable(RedisPipelineAwaitable* owner);
@@ -251,10 +274,16 @@ namespace galay::redis
             void rebind(RedisPipelineAwaitable* owner);
 
         private:
+            void refillIovWindow();
+            int pendingIovCount();
+            bool advanceAfterWrite(size_t sent_bytes);
+
             RedisPipelineAwaitable* m_owner;
+            size_t m_iov_cursor = 0;
+            size_t m_next_command_index = 0;
         };
 
-        class ProtocolRecvAwaitable : public RecvAwaitable
+        class ProtocolRecvAwaitable : public ReadvIOContext
         {
         public:
             explicit ProtocolRecvAwaitable(RedisPipelineAwaitable* owner);
@@ -274,7 +303,7 @@ namespace galay::redis
         };
 
         RedisPipelineAwaitable(RedisClient& client,
-                              std::vector<std::vector<std::string>> commands);
+                              std::span<const RedisCommandView> commands);
 
         RedisPipelineAwaitable(const RedisPipelineAwaitable&) = delete;
         RedisPipelineAwaitable& operator=(const RedisPipelineAwaitable&) = delete;
@@ -313,6 +342,11 @@ namespace galay::redis
             Invalid
         };
 
+        struct EncodedSlice {
+            size_t offset = 0;
+            size_t length = 0;
+        };
+
         void initTaskQueue();
         void moveFrom(RedisPipelineAwaitable&& other) noexcept;
         void markMovedFrom() noexcept;
@@ -325,7 +359,8 @@ namespace galay::redis
 
         RedisClient* m_client;
         size_t m_expected_replies = 0;
-        std::string m_encoded_batch;
+        std::string m_encoded_buffer;
+        std::vector<EncodedSlice> m_encoded_slices;
         std::string m_parse_buffer;
         std::vector<RedisValue> m_values;
         State m_state;
@@ -384,8 +419,10 @@ namespace galay::redis
         State m_state;
 
         std::optional<galay::kernel::ConnectAwaitable> m_connect_awaitable;
-        std::optional<SendAwaitable> m_send_awaitable;
+        std::optional<WritevAwaitable> m_send_awaitable;
         std::optional<ReadvAwaitable> m_recv_awaitable;
+        std::array<struct iovec, 1> m_send_iovec{};
+        std::array<struct iovec, 2> m_recv_iovecs{};
         std::vector<RedisValue> m_temp_values;
         std::string m_encoded_cmd;
         std::string m_parse_buffer;
@@ -403,7 +440,9 @@ namespace galay::redis
     class RedisClient
     {
     public:
-        RedisClient(IOScheduler* scheduler, AsyncRedisConfig config = AsyncRedisConfig::noTimeout());
+        RedisClient(IOScheduler* scheduler,
+                    AsyncRedisConfig config = AsyncRedisConfig::noTimeout(),
+                    std::shared_ptr<RedisBufferProvider> buffer_provider = nullptr);
 
         /**
          * @brief 移动构造函数
@@ -430,99 +469,18 @@ namespace galay::redis
          * @return RedisConnectAwaitable 连接等待体
          */
         RedisConnectAwaitable connect(const std::string& url);
-        RedisConnectAwaitable connect(const std::string& ip, int32_t port,
-                                      const std::string& username = "",
-                                      const std::string& password = "");
-        RedisConnectAwaitable connect(const std::string& ip, int32_t port,
-                                      const std::string& username,
-                                      const std::string& password,
-                                      int32_t db_index);
-        RedisConnectAwaitable connect(const std::string& ip, int32_t port,
-                                      const std::string& username,
-                                      const std::string& password,
-                                      int32_t db_index, int version);
+        RedisConnectAwaitable connect(const std::string& ip,
+                                      int32_t port,
+                                      RedisConnectOptions options = {});
 
-        // ======================== 基础Redis命令 ========================
+        // ======================== 命令执行 ========================
 
-        RedisClientAwaitable execute(const std::string& cmd, const std::vector<std::string>& args);
-        RedisClientAwaitable execute(const std::string& cmd,
-                                     const std::vector<std::string>& args,
-                                     size_t expected_replies);
+        RedisClientAwaitable command(RedisEncodedCommand command_packet);
         RedisClientAwaitable receive(size_t expected_replies = 1);
-        RedisClientAwaitable auth(const std::string& password);
-        RedisClientAwaitable auth(const std::string& username, const std::string& password);
-        RedisClientAwaitable select(int32_t db_index);
-        RedisClientAwaitable ping();
-        RedisClientAwaitable echo(const std::string& message);
-
-        // ======================== 发布订阅 ========================
-
-        RedisClientAwaitable publish(const std::string& channel, const std::string& message);
-        RedisClientAwaitable subscribe(const std::string& channel);
-        RedisClientAwaitable subscribe(const std::vector<std::string>& channels);
-        RedisClientAwaitable unsubscribe(const std::string& channel);
-        RedisClientAwaitable unsubscribe(const std::vector<std::string>& channels);
-        RedisClientAwaitable psubscribe(const std::string& pattern);
-        RedisClientAwaitable psubscribe(const std::vector<std::string>& patterns);
-        RedisClientAwaitable punsubscribe(const std::string& pattern);
-        RedisClientAwaitable punsubscribe(const std::vector<std::string>& patterns);
-
-        // ======================== 集群/主从命令 ========================
-
-        RedisClientAwaitable role();
-        RedisClientAwaitable replicaof(const std::string& host, int32_t port);
-        RedisClientAwaitable readonly();
-        RedisClientAwaitable readwrite();
-        RedisClientAwaitable clusterInfo();
-        RedisClientAwaitable clusterNodes();
-        RedisClientAwaitable clusterSlots();
-
-        // ======================== String操作 ========================
-
-        RedisClientAwaitable get(const std::string& key);
-        RedisClientAwaitable set(const std::string& key, const std::string& value);
-        RedisClientAwaitable setex(const std::string& key, int64_t seconds, const std::string& value);
-        RedisClientAwaitable del(const std::string& key);
-        RedisClientAwaitable exists(const std::string& key);
-        RedisClientAwaitable incr(const std::string& key);
-        RedisClientAwaitable decr(const std::string& key);
-
-        // ======================== Hash操作 ========================
-
-        RedisClientAwaitable hget(const std::string& key, const std::string& field);
-        RedisClientAwaitable hset(const std::string& key, const std::string& field, const std::string& value);
-        RedisClientAwaitable hdel(const std::string& key, const std::string& field);
-        RedisClientAwaitable hgetAll(const std::string& key);
-
-        // ======================== List操作 ========================
-
-        RedisClientAwaitable lpush(const std::string& key, const std::string& value);
-        RedisClientAwaitable rpush(const std::string& key, const std::string& value);
-        RedisClientAwaitable lpop(const std::string& key);
-        RedisClientAwaitable rpop(const std::string& key);
-        RedisClientAwaitable llen(const std::string& key);
-        RedisClientAwaitable lrange(const std::string& key, int64_t start, int64_t stop);
-
-        // ======================== Set操作 ========================
-
-        RedisClientAwaitable sadd(const std::string& key, const std::string& member);
-        RedisClientAwaitable srem(const std::string& key, const std::string& member);
-        RedisClientAwaitable smembers(const std::string& key);
-        RedisClientAwaitable scard(const std::string& key);
-
-        // ======================== Sorted Set操作 ========================
-
-        RedisClientAwaitable zadd(const std::string& key, double score, const std::string& member);
-        RedisClientAwaitable zrem(const std::string& key, const std::string& member);
-        RedisClientAwaitable zrange(const std::string& key, int64_t start, int64_t stop);
-        RedisClientAwaitable zscore(const std::string& key, const std::string& member);
 
         // ======================== Pipeline批量操作 ========================
 
-        RedisPipelineAwaitable pipeline(const std::vector<std::vector<std::string>>& commands);
-        RedisPipelineAwaitable pipeline(std::vector<std::vector<std::string>>&& commands);
-        RedisPipelineAwaitable batch(const std::vector<std::vector<std::string>>& commands);
-        RedisPipelineAwaitable batch(std::vector<std::vector<std::string>>&& commands);
+        RedisPipelineAwaitable batch(std::span<const RedisCommandView> commands);
 
         // ======================== 连接管理 ========================
 
@@ -546,17 +504,16 @@ namespace galay::redis
         bool m_is_closed = false;
         TcpSocket m_socket;
         IOScheduler* m_scheduler;
-        protocol::RespEncoder m_encoder;
         protocol::RespParser m_parser;
         AsyncRedisConfig m_config;
-        RingBuffer m_ring_buffer;
+        std::shared_ptr<RedisBufferProvider> m_buffer_provider;
 
         RedisLoggerPtr m_logger;
     };
 
     inline galay::redis::RedisClient galay::redis::RedisClientBuilder::build() const
     {
-        return RedisClient(m_scheduler, m_config);
+        return RedisClient(m_scheduler, m_config, m_buffer_provider);
     }
 
 }
