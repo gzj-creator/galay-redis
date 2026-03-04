@@ -2,6 +2,7 @@
 #include <galay-kernel/kernel/Runtime.h>
 #include <iostream>
 #include <chrono>
+#include <array>
 
 using namespace galay::redis;
 using namespace galay::kernel;
@@ -14,6 +15,7 @@ Coroutine testRedisClientWithTimeout(IOScheduler* scheduler)
 {
     // 创建RedisClient
     auto client = RedisClientBuilder().scheduler(scheduler).build();
+    RedisCommandBuilder command_builder;
 
     // 连接到Redis服务器
     auto connect_result = co_await client.connect("127.0.0.1", 6379).timeout(std::chrono::seconds(5));
@@ -27,7 +29,7 @@ Coroutine testRedisClientWithTimeout(IOScheduler* scheduler)
     // ==================== 测试1: 正常命令（无超时） ====================
     std::cout << "\n=== Test 1: Normal command without timeout ===" << std::endl;
 
-    auto set_result = co_await client.set("test_key", "test_value");
+    auto set_result = co_await client.command(command_builder.set("test_key", "test_value"));
     if (set_result && set_result.value()) {
         std::cout << "SET command succeeded" << std::endl;
     } else if (!set_result) {
@@ -38,7 +40,8 @@ Coroutine testRedisClientWithTimeout(IOScheduler* scheduler)
     std::cout << "\n=== Test 2: Command with 5 second timeout ===" << std::endl;
 
     // 使用timeout()方法设置5秒超时
-    auto get_result = co_await client.get("test_key").timeout(std::chrono::seconds(5));
+    auto get_result = co_await client.command(command_builder.get("test_key"))
+                          .timeout(std::chrono::seconds(5));
     if (get_result && get_result.value()) {
         auto& values = get_result.value().value();
         if (!values.empty() && values[0].isString()) {
@@ -52,7 +55,8 @@ Coroutine testRedisClientWithTimeout(IOScheduler* scheduler)
     std::cout << "\n=== Test 3: Command with very short timeout (100ms) ===" << std::endl;
 
     // 使用非常短的超时，可能会触发超时错误
-    auto ping_result = co_await client.ping().timeout(std::chrono::milliseconds(100));
+    auto ping_result = co_await client.command(command_builder.ping())
+                           .timeout(std::chrono::milliseconds(100));
     if (ping_result && ping_result.value()) {
         std::cout << "PING command succeeded within 100ms" << std::endl;
     } else if (!ping_result) {
@@ -65,15 +69,15 @@ Coroutine testRedisClientWithTimeout(IOScheduler* scheduler)
     // ==================== 测试4: Pipeline with timeout ====================
     std::cout << "\n=== Test 4: Pipeline with timeout ===" << std::endl;
 
-    std::vector<std::vector<std::string>> commands = {
-        {"SET", "key1", "value1"},
-        {"SET", "key2", "value2"},
-        {"GET", "key1"},
-        {"GET", "key2"}
-    };
+    RedisCommandBuilder commands;
+    commands.reserve(4, 6, 128);
+    commands.append("SET", std::array<std::string_view, 2>{"key1", "value1"});
+    commands.append("SET", std::array<std::string_view, 2>{"key2", "value2"});
+    commands.append("GET", std::array<std::string_view, 1>{"key1"});
+    commands.append("GET", std::array<std::string_view, 1>{"key2"});
 
     // Pipeline也支持超时
-    auto pipeline_result = co_await client.pipeline(commands);
+    auto pipeline_result = co_await client.batch(commands.commands());
     if (pipeline_result && pipeline_result.value()) {
         auto& values = pipeline_result.value().value();
         std::cout << "Pipeline succeeded, received " << values.size() << " responses" << std::endl;
@@ -96,7 +100,8 @@ Coroutine testRedisClientWithTimeout(IOScheduler* scheduler)
 
     for (int i = 0; i < 3; ++i) {
         std::string key = "counter_" + std::to_string(i);
-        auto incr_result = co_await client.incr(key).timeout(std::chrono::seconds(2));
+        auto incr_result = co_await client.command(command_builder.incr(key))
+                               .timeout(std::chrono::seconds(2));
 
         if (incr_result && incr_result.value()) {
             auto& values = incr_result.value().value();
@@ -119,6 +124,7 @@ Coroutine testRedisClientWithTimeout(IOScheduler* scheduler)
 Coroutine testConcurrentCommands(IOScheduler* scheduler, int client_id)
 {
     auto client = RedisClientBuilder().scheduler(scheduler).build();
+    RedisCommandBuilder command_builder;
 
     auto connect_result = co_await client.connect("127.0.0.1", 6379).timeout(std::chrono::seconds(5));
     if (!connect_result) {
@@ -133,12 +139,14 @@ Coroutine testConcurrentCommands(IOScheduler* scheduler, int client_id)
         std::string key = "client_" + std::to_string(client_id) + "_key_" + std::to_string(i);
         std::string value = "value_" + std::to_string(i);
 
-        auto set_result = co_await client.set(key, value).timeout(std::chrono::seconds(3));
+        auto set_result = co_await client.command(command_builder.set(key, value))
+                              .timeout(std::chrono::seconds(3));
         if (set_result && set_result.value()) {
             std::cout << "Client " << client_id << " SET " << key << " succeeded" << std::endl;
         }
 
-        auto get_result = co_await client.get(key).timeout(std::chrono::seconds(3));
+        auto get_result = co_await client.command(command_builder.get(key))
+                              .timeout(std::chrono::seconds(3));
         if (get_result && get_result.value()) {
             std::cout << "Client " << client_id << " GET " << key << " succeeded" << std::endl;
         }

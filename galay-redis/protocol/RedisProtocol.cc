@@ -1,8 +1,64 @@
 #include "RedisProtocol.h"
 #include <cstring>
+#include <charconv>
+
+#if defined(__SSE2__)
+#include <immintrin.h>
+#endif
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 namespace galay::redis::protocol
 {
+    namespace
+    {
+        const char* findCRLFSimd(const char* begin, const char* end)
+        {
+#if defined(__SSE2__)
+            const __m128i cr = _mm_set1_epi8('\r');
+            const char* p = begin;
+            while (p + 16 <= end) {
+                const __m128i block = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+                int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(block, cr));
+                while (mask != 0) {
+                    const int idx = __builtin_ctz(mask);
+                    const char* candidate = p + idx;
+                    if (candidate + 1 < end && candidate[1] == '\n') {
+                        return candidate;
+                    }
+                    mask &= (mask - 1);
+                }
+                p += 16;
+            }
+            return p;
+#elif defined(__ARM_NEON)
+            const uint8x16_t cr = vdupq_n_u8(static_cast<uint8_t>('\r'));
+            const char* p = begin;
+            while (p + 16 <= end) {
+                const uint8x16_t block = vld1q_u8(reinterpret_cast<const uint8_t*>(p));
+                const uint8x16_t eq = vceqq_u8(block, cr);
+                const uint64x2_t lanes = vreinterpretq_u64_u8(eq);
+                if ((vgetq_lane_u64(lanes, 0) | vgetq_lane_u64(lanes, 1)) != 0) {
+                    for (int i = 0; i < 16; ++i) {
+                        const char* candidate = p + i;
+                        if (candidate + 1 >= end) {
+                            break;
+                        }
+                        if (candidate[0] == '\r' && candidate[1] == '\n') {
+                            return candidate;
+                        }
+                    }
+                }
+                p += 16;
+            }
+            return p;
+#else
+            return begin;
+#endif
+        }
+    }
+
     // RedisReply实现
     RedisReply::RedisReply()
         : m_type(RespType::Null), m_data(std::monostate{})
@@ -107,10 +163,31 @@ namespace galay::redis::protocol
 
     std::optional<size_t> RespParser::findCRLF(const char* data, size_t length, size_t offset)
     {
-        for (size_t i = offset; i + 1 < length; ++i) {
-            if (data[i] == '\r' && data[i + 1] == '\n') {
-                return i;
+        if (offset >= length || length < 2) {
+            return std::nullopt;
+        }
+        const char* begin = data + offset;
+        const char* end = data + length;
+
+        // For short messages, scalar scan is cheaper than SIMD setup.
+        if (static_cast<size_t>(end - begin) < 64U) {
+            for (const char* p = begin; p + 1 < end; ++p) {
+                if (p[0] == '\r' && p[1] == '\n') {
+                    return static_cast<size_t>(p - data);
+                }
             }
+            return std::nullopt;
+        }
+
+        const char* p = findCRLFSimd(begin, end);
+        while (p + 1 < end) {
+            const void* found = memchr(p, '\r', static_cast<size_t>(end - p - 1));
+            if (!found) return std::nullopt;
+            const char* candidate = static_cast<const char*>(found);
+            if (candidate[1] == '\n') {
+                return static_cast<size_t>(candidate - data);
+            }
+            p = candidate + 1;
         }
         return std::nullopt;
     }
@@ -120,26 +197,14 @@ namespace galay::redis::protocol
         if (length == 0) {
             return std::unexpected(ParseError::InvalidFormat);
         }
-
         int64_t result = 0;
-        bool negative = false;
-        size_t i = 0;
-
-        if (data[0] == '-') {
-            negative = true;
-            i = 1;
-        } else if (data[0] == '+') {
-            i = 1;
+        const char* begin = data;
+        const char* end = data + length;
+        auto [ptr, ec] = std::from_chars(begin, end, result);
+        if (ec != std::errc() || ptr != end) {
+            return std::unexpected(ParseError::InvalidFormat);
         }
-
-        for (; i < length; ++i) {
-            if (data[i] < '0' || data[i] > '9') {
-                return std::unexpected(ParseError::InvalidFormat);
-            }
-            result = result * 10 + (data[i] - '0');
-        }
-
-        return negative ? -result : result;
+        return result;
     }
 
     std::expected<std::pair<size_t, RedisReply>, ParseError>
@@ -199,6 +264,13 @@ namespace galay::redis::protocol
     std::expected<size_t, ParseError>
     RespParser::parseSimpleStringFast(const char* data, size_t length, RedisReply* out)
     {
+        // Hot path for short status replies such as "+OK\r\n".
+        if (length >= 5 && data[3] == '\r' && data[4] == '\n') {
+            std::string value(data + 1, 2);
+            *out = RedisReply(RespType::SimpleString, std::move(value));
+            return 5;
+        }
+
         auto crlf_pos = findCRLF(data, length, 1);
         if (!crlf_pos) {
             return std::unexpected(ParseError::Incomplete);
@@ -325,7 +397,6 @@ namespace galay::redis::protocol
         if (!crlf_pos) {
             return std::unexpected(ParseError::Incomplete);
         }
-
         std::string str(data + 1, *crlf_pos - 1);
         double value;
         try {
@@ -526,7 +597,7 @@ namespace galay::redis::protocol
         return result;
     }
 
-    void RespEncoder::appendCommand(std::string& out, const std::vector<std::string>& cmd_parts) const
+    void RespEncoder::append(std::string& out, const std::vector<std::string>& cmd_parts) const
     {
         if (cmd_parts.empty()) {
             out += "*0\r\n";
@@ -547,7 +618,7 @@ namespace galay::redis::protocol
         }
     }
 
-    void RespEncoder::appendCommand(std::string& out,
+    void RespEncoder::append(std::string& out,
                                     std::string_view cmd,
                                     const std::vector<std::string>& args) const
     {
@@ -567,7 +638,27 @@ namespace galay::redis::protocol
         }
     }
 
-    void RespEncoder::appendCommand(std::string& out,
+    void RespEncoder::append(std::string& out,
+                                    std::string_view cmd,
+                                    std::span<const std::string_view> args) const
+    {
+        const size_t arg_count = 1 + args.size();
+        size_t estimated = out.size() + 1 + decimalDigits(arg_count) + 2 + estimateBulkStringBytes(cmd.size());
+        for (const auto& arg : args) {
+            estimated += estimateBulkStringBytes(arg.size());
+        }
+        out.reserve(estimated);
+
+        out.push_back('*');
+        appendUnsignedDecimal(out, arg_count);
+        out += "\r\n";
+        appendBulkString(out, cmd);
+        for (const auto& arg : args) {
+            appendBulkString(out, arg);
+        }
+    }
+
+    void RespEncoder::append(std::string& out,
                                     std::string_view cmd,
                                     std::initializer_list<std::string_view> args) const
     {

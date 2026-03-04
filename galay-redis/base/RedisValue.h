@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <memory>
 
 namespace galay::redis
 {
@@ -69,8 +70,8 @@ namespace galay::redis
 
     private:
         // 缓存转换后的数组和map
-        mutable std::vector<RedisValue> m_cached_array;
-        mutable std::map<std::string, RedisValue> m_cached_map;
+        mutable std::unique_ptr<std::vector<RedisValue>> m_cached_array;
+        mutable std::unique_ptr<std::map<std::string, RedisValue>> m_cached_map;
         mutable bool m_array_cached = false;
         mutable bool m_map_cached = false;
     };

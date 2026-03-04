@@ -11,6 +11,8 @@
 #include <string_view>
 #include <charconv>
 #include <type_traits>
+#include <span>
+#include <array>
 
 namespace galay::redis::protocol
 {
@@ -203,13 +205,74 @@ namespace galay::redis::protocol
         std::string encodeCommand(std::initializer_list<std::string> cmd_parts);
 
         // 直接追加编码后的命令，避免每条命令产生临时字符串
-        void appendCommand(std::string& out, const std::vector<std::string>& cmd_parts) const;
-        void appendCommand(std::string& out,
+        void append(std::string& out, const std::vector<std::string>& cmd_parts) const;
+        void append(std::string& out,
                            std::string_view cmd,
                            const std::vector<std::string>& args) const;
-        void appendCommand(std::string& out,
+        void append(std::string& out,
+                           std::string_view cmd,
+                           std::span<const std::string_view> args) const;
+        void append(std::string& out,
                            std::string_view cmd,
                            std::initializer_list<std::string_view> args) const;
+
+        // Fast-path: append command without reserve (caller must ensure capacity)
+        void appendCommandFast(std::string& out, const std::vector<std::string>& cmd_parts) const
+        {
+            if (cmd_parts.empty()) {
+                out += "*0\r\n";
+                return;
+            }
+            out.push_back('*');
+            appendUnsignedDecimal(out, cmd_parts.size());
+            out += "\r\n";
+            for (const auto& part : cmd_parts) {
+                appendBulkString(out, part);
+            }
+        }
+
+        // Fast-path overloads for pre-reserved output buffers.
+        void appendCommandFast(std::string& out,
+                               std::string_view cmd,
+                               std::span<const std::string_view> args) const
+        {
+            const size_t arg_count = 1 + args.size();
+            out.push_back('*');
+            appendUnsignedDecimal(out, arg_count);
+            out += "\r\n";
+            appendBulkString(out, cmd);
+            for (const auto& arg : args) {
+                appendBulkString(out, arg);
+            }
+        }
+
+        void appendCommandFast(std::string& out,
+                               std::string_view cmd,
+                               const std::vector<std::string>& args) const
+        {
+            const size_t arg_count = 1 + args.size();
+            out.push_back('*');
+            appendUnsignedDecimal(out, arg_count);
+            out += "\r\n";
+            appendBulkString(out, cmd);
+            for (const auto& arg : args) {
+                appendBulkString(out, arg);
+            }
+        }
+
+        void appendCommandFast(std::string& out,
+                               std::string_view cmd,
+                               std::initializer_list<std::string_view> args) const
+        {
+            const size_t arg_count = 1 + args.size();
+            out.push_back('*');
+            appendUnsignedDecimal(out, arg_count);
+            out += "\r\n";
+            appendBulkString(out, cmd);
+            for (const auto& arg : args) {
+                appendBulkString(out, arg);
+            }
+        }
 
     private:
         static void appendUnsignedDecimal(std::string& out, size_t value)

@@ -1,5 +1,6 @@
+#include <array>
 #include <chrono>
-#include <vector>
+#include <span>
 
 #include "async/RedisClient.h"
 
@@ -40,13 +41,29 @@ int main()
     DummyScheduler scheduler;
     auto client = RedisClientBuilder().scheduler(&scheduler).build();
 
-    std::vector<std::vector<std::string>> commands = {
-        {"SET", "batch:key", "v1"},
-        {"GET", "batch:key"},
-    };
+    RedisCommandBuilder builder;
+    builder.reserve(2, 3, 64);
+    builder.append("SET", std::array<std::string_view, 2>{"batch:span:key", "v1"});
+    builder.append("GET", std::array<std::string_view, 1>{"batch:span:key"});
+    const auto first_commands = builder.commands();
+    if (first_commands.size() != 2) {
+        return 2;
+    }
+    if (first_commands[0].encoded.empty() || first_commands[1].encoded.empty()) {
+        return 3;
+    }
 
-    auto batch_awaitable = client.batch(commands).timeout(std::chrono::milliseconds(200));
+    auto pipeline_awaitable = client.batch(first_commands);
+    auto batch_awaitable =
+        client.batch(builder.commands()).timeout(std::chrono::milliseconds(200));
 
+    builder.clear();
+    builder.append("SET", std::array<std::string_view, 2>{"batch:span:key:2", "v2"});
+    builder.append("GET", std::array<std::string_view, 1>{"batch:span:key:2"});
+    auto reuse_awaitable = client.batch(builder.commands());
+
+    (void)pipeline_awaitable;
     (void)batch_awaitable;
+    (void)reuse_awaitable;
     return 0;
 }

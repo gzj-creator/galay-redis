@@ -145,6 +145,7 @@ namespace
 
 Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
 {
+    RedisCommandBuilder command_builder;
     do {
         auto cluster = RedisClusterClientBuilder().scheduler(scheduler).build();
         cluster.setAutoRefreshInterval(std::chrono::milliseconds(1000));
@@ -170,12 +171,12 @@ Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
         std::string moved_key = cfg.moved_key.empty() ? "galay:it:moved:key" : cfg.moved_key;
         cluster.setSlotRange(0, 0, 16383);  // 故意污染本地映射，触发 MOVED 自动重定向路径
 
-        auto moved_set = co_await cluster.executeByKeyAuto(moved_key, "SET", {moved_key, "moved-ok"});
+        auto moved_set = co_await cluster.execute("SET", {moved_key, "moved-ok"}, moved_key, true);
         if (!moved_set) {
             fail("MOVED auto redirect SET failed: " + moved_set.error().message());
             break;
         }
-        auto moved_get = co_await cluster.executeByKeyAuto(moved_key, "GET", {moved_key});
+        auto moved_get = co_await cluster.execute("GET", {moved_key}, moved_key, true);
         std::string moved_value;
         if (!expectSingleStringReply(moved_get, &moved_value)) {
             break;
@@ -193,13 +194,14 @@ Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
                 break;
             }
 
-            auto ask_raw = co_await direct_seed.execute("GET", {cfg.ask_key}).timeout(std::chrono::seconds(5));
+            auto ask_raw = co_await direct_seed.command(command_builder.get(cfg.ask_key))
+                               .timeout(std::chrono::seconds(5));
             if (!isAskErrorReply(ask_raw)) {
                 fail("ASK not observed on direct seed GET, check container ask-slot setup");
                 break;
             }
 
-            auto ask_auto = co_await cluster.executeByKeyAuto(cfg.ask_key, "GET", {cfg.ask_key});
+            auto ask_auto = co_await cluster.execute("GET", {cfg.ask_key}, cfg.ask_key, true);
             if (!ask_auto) {
                 fail("ASK auto redirect failed: " + ask_auto.error().message());
                 break;
@@ -234,7 +236,7 @@ Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
             break;
         }
 
-        auto write_before = co_await ms.executeWriteAuto("SET", {cfg.sentinel_test_key, "before-failover"});
+        auto write_before = co_await ms.execute("SET", {cfg.sentinel_test_key, "before-failover"});
         if (!write_before) {
             fail("Sentinel write(before) failed: " + write_before.error().message());
             break;
@@ -247,7 +249,9 @@ Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
                 fail("Sentinel ctl connect failed: " + ctl_connect.error().message());
                 break;
             }
-            auto failover_cmd = co_await sentinel_ctl.execute("SENTINEL", {"FAILOVER", cfg.sentinel_master_name})
+            auto failover_cmd = co_await sentinel_ctl.command(
+                                    command_builder.command("SENTINEL",
+                                                            {"FAILOVER", cfg.sentinel_master_name}))
                                     .timeout(std::chrono::seconds(5));
             if (!failover_cmd || !failover_cmd.value().has_value()) {
                 fail("Sentinel FAILOVER command failed");
@@ -259,8 +263,8 @@ Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
             for (int i = 0; i < 120; ++i) {
                 auto refresh = co_await ms.refreshFromSentinel();
                 (void)refresh;
-                auto write_after = co_await ms.executeWriteAuto("SET",
-                                                                {cfg.sentinel_test_key, "after-failover"});
+                auto write_after = co_await ms.execute("SET",
+                                                       {cfg.sentinel_test_key, "after-failover"});
                 if (write_after) {
                     write_after_ok = true;
                     break;
@@ -275,7 +279,7 @@ Coroutine runIntegration(IOScheduler* scheduler, IntegrationConfig cfg)
 
         bool read_ok = false;
         for (int i = 0; i < 60; ++i) {
-            auto read_after = co_await ms.executeReadAuto("GET", {cfg.sentinel_test_key});
+            auto read_after = co_await ms.execute("GET", {cfg.sentinel_test_key}, true);
             std::string read_value;
             if (expectSingleStringReply(read_after, &read_value)) {
                 if (read_value == "after-failover" || read_value == "before-failover") {

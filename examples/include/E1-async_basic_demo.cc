@@ -50,6 +50,7 @@ Coroutine runDemo(
     std::string value)
 {
     auto client = RedisClientBuilder().scheduler(scheduler).build();
+    RedisCommandBuilder command_builder;
 
     auto connect_result = co_await client.connect(host, port).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
@@ -59,7 +60,7 @@ Coroutine runDemo(
         co_return;
     }
 
-    auto set_result = co_await client.set(key, value).timeout(
+    auto set_result = co_await client.command(command_builder.set(key, value)).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
     if (!set_result) {
         std::cerr << "SET failed: " << set_result.error().message() << std::endl;
@@ -74,7 +75,7 @@ Coroutine runDemo(
         co_return;
     }
 
-    auto get_result = co_await client.get(key).timeout(
+    auto get_result = co_await client.command(command_builder.get(key)).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
     if (!get_result) {
         std::cerr << "GET failed: " << get_result.error().message() << std::endl;
@@ -98,7 +99,7 @@ Coroutine runDemo(
     }
     std::cout << "E1 demo value: " << values[0].toString() << std::endl;
 
-    auto del_result = co_await client.del(key).timeout(
+    auto del_result = co_await client.command(command_builder.del(key)).timeout(
         std::chrono::seconds(galay::redis::example::kDefaultTimeoutSeconds));
     if (!del_result) {
         std::cerr << "DEL failed: " << del_result.error().message() << std::endl;

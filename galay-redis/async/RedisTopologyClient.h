@@ -102,16 +102,16 @@ namespace galay::redis
         RedisConnectAwaitable connectMaster(const RedisNodeAddress& master);
         RedisConnectAwaitable addReplica(const RedisNodeAddress& replica);
 
-        RedisClientAwaitable executeWrite(const std::string& cmd, const std::vector<std::string>& args);
-        RedisPipelineAwaitable pipelineWrite(const std::vector<std::vector<std::string>>& commands);
-        RedisClientAwaitable executeRead(const std::string& cmd, const std::vector<std::string>& args);
-        RedisPipelineAwaitable pipelineRead(const std::vector<std::vector<std::string>>& commands);
+        RedisCommandResultAwaitable execute(const std::string& cmd,
+                                            const std::vector<std::string>& args,
+                                            bool prefer_read = false,
+                                            bool auto_retry = true);
+        RedisPipelineAwaitable batch(std::span<const RedisCommandView> commands,
+                                     bool prefer_read = false);
         RedisConnectAwaitable addSentinel(const RedisNodeAddress& sentinel);
         void setSentinelMasterName(std::string master_name);
         void setAutoRetryAttempts(size_t attempts) noexcept;
         RedisCommandResultAwaitable refreshFromSentinel();
-        RedisCommandResultAwaitable executeWriteAuto(const std::string& cmd, const std::vector<std::string>& args);
-        RedisCommandResultAwaitable executeReadAuto(const std::string& cmd, const std::vector<std::string>& args);
 
         RedisClient& master();
         std::optional<std::reference_wrapper<RedisClient>> replica(size_t index);
@@ -128,6 +128,7 @@ namespace galay::redis
         Coroutine executeAutoCoroutine(bool prefer_read,
                                        std::string cmd,
                                        std::vector<std::string> args,
+                                       size_t max_attempts,
                                        std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> waiter);
         Coroutine refreshSentinelCoroutine();
 
@@ -217,17 +218,13 @@ namespace galay::redis
         void setSlotRange(size_t node_index, uint16_t slot_start, uint16_t slot_end);
         void setAutoRefreshInterval(std::chrono::milliseconds interval);
 
-        RedisClientAwaitable execute(const std::string& cmd, const std::vector<std::string>& args);
-        RedisClientAwaitable executeByKey(const std::string& routing_key,
-                                          const std::string& cmd,
-                                          const std::vector<std::string>& args);
-        RedisPipelineAwaitable pipelineByKey(const std::string& routing_key,
-                                             const std::vector<std::vector<std::string>>& commands);
+        RedisCommandResultAwaitable execute(const std::string& cmd,
+                                            const std::vector<std::string>& args,
+                                            std::string routing_key = std::string(),
+                                            bool auto_retry = true);
+        RedisPipelineAwaitable batch(std::span<const RedisCommandView> commands,
+                                     std::string routing_key = std::string());
         RedisCommandResultAwaitable refreshSlots();
-        RedisCommandResultAwaitable executeAuto(const std::string& cmd, const std::vector<std::string>& args);
-        RedisCommandResultAwaitable executeByKeyAuto(const std::string& routing_key,
-                                                     const std::string& cmd,
-                                                     const std::vector<std::string>& args);
 
         uint16_t keySlot(const std::string& key) const;
         size_t nodeCount() const noexcept;
@@ -260,6 +257,8 @@ namespace galay::redis
                                        std::string cmd,
                                        std::vector<std::string> args,
                                        bool force_key_routing,
+                                       bool allow_auto_refresh,
+                                       size_t max_attempts,
                                        std::shared_ptr<galay::kernel::AsyncWaiter<RedisCommandResult>> waiter);
 
         static uint16_t crc16(const uint8_t* data, size_t len);

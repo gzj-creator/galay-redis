@@ -178,6 +178,7 @@ Coroutine poolWorker(
     std::shared_ptr<std::atomic<int>> remaining,
     std::shared_ptr<AsyncWaiter<void>> done_waiter)
 {
+    RedisCommandBuilder command_builder;
     std::int64_t local_success = 0;
     std::int64_t local_error = 0;
     std::int64_t local_timeout = 0;
@@ -221,10 +222,12 @@ Coroutine poolWorker(
         const std::string key = "bench:pool:" + std::to_string(worker_id) + ":" + std::to_string(i);
         const std::string value = "value_" + std::to_string(i);
 
-        auto set_result = co_await client->set(key, value).timeout(std::chrono::seconds(5));
+        auto set_result = co_await client->command(command_builder.set(key, value))
+                              .timeout(std::chrono::seconds(5));
         countCommandResult(set_result, local_success, local_error, local_timeout);
 
-        auto get_result = co_await client->get(key).timeout(std::chrono::seconds(5));
+        auto get_result = co_await client->command(command_builder.get(key))
+                              .timeout(std::chrono::seconds(5));
         countCommandResult(get_result, local_success, local_error, local_timeout);
 
         pool->release(conn);

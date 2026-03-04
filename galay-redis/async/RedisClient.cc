@@ -30,15 +30,6 @@ namespace galay::redis
             return digits;
         }
 
-        size_t estimateRespCommandBytes(const std::vector<std::string>& cmd_parts)
-        {
-            size_t total = 1 + decimalDigits(cmd_parts.size()) + 2;
-            for (const auto& part : cmd_parts) {
-                total += 1 + decimalDigits(part.size()) + 2 + part.size() + 2;
-            }
-            return total;
-        }
-
         size_t estimateRespCommandBytes(std::string_view cmd, const std::vector<std::string>& args)
         {
             size_t total = 1 + decimalDigits(1 + args.size()) + 2;
@@ -48,6 +39,22 @@ namespace galay::redis
             }
             return total;
         }
+
+        size_t estimateRespCommandBytes(std::string_view cmd, std::span<const std::string_view> args)
+        {
+            size_t total = 1 + decimalDigits(1 + args.size()) + 2;
+            total += 1 + decimalDigits(cmd.size()) + 2 + cmd.size() + 2;
+            for (const auto& arg : args) {
+                total += 1 + decimalDigits(arg.size()) + 2 + arg.size() + 2;
+            }
+            return total;
+        }
+
+#ifdef IOV_MAX
+        constexpr int kPipelineWritevMaxIov = IOV_MAX > 0 ? IOV_MAX : 1024;
+#else
+        constexpr int kPipelineWritevMaxIov = 1024;
+#endif
 
         const char* prepareParseInput(const struct iovec* read_iovecs,
                                       size_t read_iovec_count,
@@ -79,13 +86,143 @@ namespace galay::redis
             }
             return parse_buffer.data();
         }
+
+        enum class ParseChunkState : uint8_t
+        {
+            Done,
+            NeedMore,
+            ParseError
+        };
+
+        struct ParseChunkResult
+        {
+            size_t consumed = 0;
+            ParseChunkState state = ParseChunkState::NeedMore;
+        };
+
+        ParseChunkResult parseRepliesFromChunk(protocol::RespParser& parser,
+                                               const char* data,
+                                               size_t len,
+                                               size_t expected_replies,
+                                               std::vector<RedisValue>& values)
+        {
+            ParseChunkResult result;
+            while (values.size() < expected_replies && result.consumed < len) {
+                protocol::RedisReply reply;
+                auto parse_result =
+                    parser.parseFast(data + result.consumed, len - result.consumed, &reply);
+                if (parse_result) {
+                    result.consumed += parse_result.value();
+                    values.emplace_back(std::move(reply));
+                    continue;
+                }
+
+                if (parse_result.error() == protocol::ParseError::Incomplete) {
+                    result.state = ParseChunkState::NeedMore;
+                } else {
+                    result.state = ParseChunkState::ParseError;
+                }
+                return result;
+            }
+
+            if (values.size() >= expected_replies) {
+                result.state = ParseChunkState::Done;
+            } else {
+                result.state = ParseChunkState::NeedMore;
+            }
+            return result;
+        }
+
+        bool parseRepliesFromRingBuffer(RedisBufferProvider& ring_buffer,
+                                        protocol::RespParser& parser,
+                                        std::string& parse_buffer,
+                                        size_t expected_replies,
+                                        std::vector<RedisValue>& values,
+                                        bool& parse_error)
+        {
+            struct iovec read_iovecs[2];
+            while (values.size() < expected_replies) {
+                const size_t read_iovec_count = ring_buffer.getReadIovecs(read_iovecs, 2);
+                if (read_iovec_count == 0) {
+                    return false;
+                }
+
+                const char* first_data = static_cast<const char*>(read_iovecs[0].iov_base);
+                const size_t first_len = read_iovecs[0].iov_len;
+                if (first_data == nullptr || first_len == 0) {
+                    return false;
+                }
+
+                const auto first_chunk =
+                    parseRepliesFromChunk(parser, first_data, first_len, expected_replies, values);
+                if (first_chunk.consumed > 0) {
+                    ring_buffer.consume(first_chunk.consumed);
+                }
+
+                if (first_chunk.state == ParseChunkState::ParseError) {
+                    parse_error = true;
+                    return true;
+                }
+                if (values.size() >= expected_replies) {
+                    return true;
+                }
+
+                // Fast path: first iovec fully consumed, continue without any copy.
+                if (first_chunk.consumed == first_len) {
+                    if (first_chunk.consumed == 0) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                // Not enough data in first iovec and no wrapped second iovec available.
+                if (read_iovec_count < 2) {
+                    return false;
+                }
+
+                const char* second_data = static_cast<const char*>(read_iovecs[1].iov_base);
+                const size_t second_len = read_iovecs[1].iov_len;
+                if (second_data == nullptr || second_len == 0) {
+                    return false;
+                }
+
+                // Only stitch the unparsed tail + wrapped head instead of copying full readable bytes.
+                const size_t first_tail_offset = first_chunk.consumed;
+                const size_t first_tail_len = first_len - first_tail_offset;
+                parse_buffer.clear();
+                parse_buffer.reserve(first_tail_len + second_len);
+                parse_buffer.append(first_data + first_tail_offset, first_tail_len);
+                parse_buffer.append(second_data, second_len);
+
+                const auto stitched_chunk = parseRepliesFromChunk(parser,
+                                                                  parse_buffer.data(),
+                                                                  parse_buffer.size(),
+                                                                  expected_replies,
+                                                                  values);
+                const size_t stitched_consume = stitched_chunk.consumed;
+                if (stitched_consume > 0) {
+                    ring_buffer.consume(stitched_consume);
+                }
+
+                if (stitched_chunk.state == ParseChunkState::ParseError) {
+                    parse_error = true;
+                    return true;
+                }
+                if (values.size() >= expected_replies) {
+                    return true;
+                }
+                if (stitched_consume == 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 
     // ======================== RedisClientAwaitable 实现 ========================
 
     RedisClientAwaitable::ProtocolSendAwaitable::ProtocolSendAwaitable(RedisClientAwaitable* owner)
-        : SendAwaitable(owner && owner->m_client ? owner->m_client->m_socket.controller() : nullptr,
-                        nullptr, 0)
+        : WritevIOContext(std::span<const struct iovec>())
         , m_owner(owner)
     {
         rebind(owner);
@@ -94,27 +231,53 @@ namespace galay::redis
     void RedisClientAwaitable::ProtocolSendAwaitable::rebind(RedisClientAwaitable* owner)
     {
         m_owner = owner;
-        m_controller = (m_owner && m_owner->m_client) ? m_owner->m_client->m_socket.controller() : nullptr;
-        if (m_owner) {
-            m_buffer = m_owner->m_encoded_cmd.data();
-            m_length = m_owner->m_encoded_cmd.size();
-        } else {
-            m_buffer = nullptr;
-            m_length = 0;
+        m_iovecs.clear();
+        if (!m_owner || m_owner->m_encoded_cmd.empty()) {
+            return;
         }
+
+        struct iovec iov;
+        iov.iov_base = const_cast<char*>(m_owner->m_encoded_cmd.data());
+        iov.iov_len = m_owner->m_encoded_cmd.size();
+        m_iovecs.push_back(iov);
+    }
+
+    int RedisClientAwaitable::ProtocolSendAwaitable::pendingIovCount()
+    {
+        while (!m_iovecs.empty() && m_iovecs.front().iov_len == 0) {
+            m_iovecs.erase(m_iovecs.begin());
+        }
+        return static_cast<int>(m_iovecs.size());
+    }
+
+    bool RedisClientAwaitable::ProtocolSendAwaitable::advanceAfterWrite(size_t sent_bytes)
+    {
+        size_t remaining = sent_bytes;
+        while (remaining > 0 && !m_iovecs.empty()) {
+            auto& iov = m_iovecs.front();
+            if (remaining < iov.iov_len) {
+                iov.iov_base = static_cast<char*>(iov.iov_base) + remaining;
+                iov.iov_len -= remaining;
+                return true;
+            }
+
+            remaining -= iov.iov_len;
+            m_iovecs.erase(m_iovecs.begin());
+        }
+        return remaining == 0;
     }
 
 #ifdef USE_IOURING
     bool RedisClientAwaitable::ProtocolSendAwaitable::handleComplete(struct io_uring_cqe* cqe, GHandle)
     {
-        if (m_length == 0) {
+        if (pendingIovCount() == 0) {
             return true;
         }
         if (cqe == nullptr) {
             return false;
         }
 
-        auto result = galay::kernel::io::handleSend(cqe);
+        auto result = galay::kernel::io::handleWritev(cqe);
         if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
             return false;
         }
@@ -128,15 +291,22 @@ namespace galay::redis
             return false;
         }
 
-        m_buffer += sent;
-        m_length -= sent;
-        return m_length == 0;
+        if (!advanceAfterWrite(sent)) {
+            m_owner->setSendError(IOError(galay::kernel::kSendFailed, 0));
+            return true;
+        }
+        return pendingIovCount() == 0;
     }
 #else
     bool RedisClientAwaitable::ProtocolSendAwaitable::handleComplete(GHandle handle)
     {
-        while (m_length > 0) {
-            auto result = galay::kernel::io::handleSend(handle, m_buffer, m_length);
+        while (true) {
+            const int iov_count = pendingIovCount();
+            if (iov_count == 0) {
+                return true;
+            }
+
+            auto result = galay::kernel::io::handleWritev(handle, m_iovecs.data(), iov_count);
             if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
                 return false;
             }
@@ -150,41 +320,49 @@ namespace galay::redis
                 return false;
             }
 
-            m_buffer += sent;
-            m_length -= sent;
+            if (!advanceAfterWrite(sent)) {
+                m_owner->setSendError(IOError(galay::kernel::kSendFailed, 0));
+                return true;
+            }
         }
-        return true;
     }
 #endif
 
     RedisClientAwaitable::ProtocolRecvAwaitable::ProtocolRecvAwaitable(RedisClientAwaitable* owner)
-        : RecvAwaitable(owner && owner->m_client ? owner->m_client->m_socket.controller() : nullptr,
-                        nullptr, 0)
+        : ReadvIOContext(std::span<const struct iovec>())
         , m_owner(owner)
     {
+        m_iovecs.reserve(2);
         rebind(owner);
     }
 
     void RedisClientAwaitable::ProtocolRecvAwaitable::rebind(RedisClientAwaitable* owner)
     {
         m_owner = owner;
-        m_controller = (m_owner && m_owner->m_client) ? m_owner->m_client->m_socket.controller() : nullptr;
-        m_buffer = nullptr;
-        m_length = 0;
+        m_iovecs.clear();
     }
 
     bool RedisClientAwaitable::ProtocolRecvAwaitable::prepareRecvWindow()
     {
+        if (!m_owner || !m_owner->m_client) {
+            return false;
+        }
+
         struct iovec write_iovecs[2];
         const size_t write_iovec_count =
-            m_owner->m_client->m_ring_buffer.getWriteIovecs(write_iovecs, 2);
+            m_owner->m_client->m_buffer_provider->getWriteIovecs(write_iovecs, 2);
         if (write_iovec_count == 0) {
             return false;
         }
 
-        m_buffer = static_cast<char*>(write_iovecs[0].iov_base);
-        m_length = write_iovecs[0].iov_len;
-        return m_length > 0;
+        m_iovecs.clear();
+        for (size_t i = 0; i < write_iovec_count; ++i) {
+            if (write_iovecs[i].iov_len == 0) {
+                continue;
+            }
+            m_iovecs.push_back(write_iovecs[i]);
+        }
+        return !m_iovecs.empty();
     }
 
 #ifdef USE_IOURING
@@ -202,7 +380,7 @@ namespace galay::redis
             return false;
         }
 
-        auto result = galay::kernel::io::handleRecv(cqe, m_buffer);
+        auto result = galay::kernel::io::handleReadv(cqe);
         if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
             return false;
         }
@@ -211,13 +389,13 @@ namespace galay::redis
             return true;
         }
 
-        const size_t recv_bytes = result.value().size();
+        const size_t recv_bytes = result.value();
         if (recv_bytes == 0) {
             m_owner->setConnectionClosedError();
             return true;
         }
 
-        m_owner->m_client->m_ring_buffer.produce(recv_bytes);
+        m_owner->m_client->m_buffer_provider->produce(recv_bytes);
         if (m_owner->parseResponsesFromRingBuffer()) {
             return true;
         }
@@ -241,7 +419,9 @@ namespace galay::redis
                 return true;
             }
 
-            auto result = galay::kernel::io::handleRecv(handle, m_buffer, m_length);
+            auto result = galay::kernel::io::handleReadv(handle,
+                                                         m_iovecs.data(),
+                                                         static_cast<int>(m_iovecs.size()));
             if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
                 return false;
             }
@@ -250,13 +430,13 @@ namespace galay::redis
                 return true;
             }
 
-            const size_t recv_bytes = result.value().size();
+            const size_t recv_bytes = result.value();
             if (recv_bytes == 0) {
                 m_owner->setConnectionClosedError();
                 return true;
             }
 
-            m_owner->m_client->m_ring_buffer.produce(recv_bytes);
+            m_owner->m_client->m_buffer_provider->produce(recv_bytes);
             if (m_owner->parseResponsesFromRingBuffer()) {
                 return true;
             }
@@ -265,14 +445,12 @@ namespace galay::redis
 #endif
 
     RedisClientAwaitable::RedisClientAwaitable(RedisClient& client,
-                                               std::string cmd,
-                                               std::vector<std::string> args,
+                                               std::string encoded_command,
                                                size_t expected_replies,
                                                bool recv_only)
         : CustomAwaitable(client.m_socket.controller())
         , m_client(&client)
-        , m_cmd(std::move(cmd))
-        , m_args(std::move(args))
+        , m_encoded_cmd(std::move(encoded_command))
         , m_expected_replies(expected_replies)
         , m_recv_only(recv_only)
         , m_state(State::Running)
@@ -280,10 +458,8 @@ namespace galay::redis
         , m_recv_awaitable(this)
         , m_result(std::nullopt)
     {
-        if (!m_recv_only) {
+        if (m_recv_only) {
             m_encoded_cmd.clear();
-            m_encoded_cmd.reserve(estimateRespCommandBytes(m_cmd, m_args));
-            m_client->m_encoder.appendCommand(m_encoded_cmd, m_cmd, m_args);
         }
 
         m_values.reserve(m_expected_replies);
@@ -318,8 +494,6 @@ namespace galay::redis
         m_waker = std::move(other.m_waker);
 
         m_client = other.m_client;
-        m_cmd = std::move(other.m_cmd);
-        m_args = std::move(other.m_args);
         m_encoded_cmd = std::move(other.m_encoded_cmd);
         m_parse_buffer = std::move(other.m_parse_buffer);
         m_expected_replies = other.m_expected_replies;
@@ -361,43 +535,26 @@ namespace galay::redis
         m_tasks.clear();
         m_cursor = 0;
         if (!m_recv_only) {
-            addTask(IOEventType::SEND, &m_send_awaitable);
+            addTask(IOEventType::WRITEV, &m_send_awaitable);
         }
-        addTask(IOEventType::RECV, &m_recv_awaitable);
+        addTask(IOEventType::READV, &m_recv_awaitable);
     }
 
     bool RedisClientAwaitable::parseResponsesFromRingBuffer()
     {
-        struct iovec read_iovecs[2];
-        while (m_values.size() < m_expected_replies) {
-            const size_t read_iovec_count = m_client->m_ring_buffer.getReadIovecs(read_iovecs, 2);
-            if (read_iovec_count == 0) {
-                return false;
-            }
-
-            size_t len = 0;
-            const char* data = prepareParseInput(read_iovecs, read_iovec_count, m_parse_buffer, len);
-            if (data == nullptr) {
-                return false;
-            }
-
-            protocol::RedisReply reply;
-            auto parse_result = m_client->m_parser.parseFast(data, len, &reply);
-            if (parse_result) {
-                const auto consumed = parse_result.value();
-                m_client->m_ring_buffer.consume(consumed);
-                m_values.emplace_back(std::move(reply));
-                continue;
-            }
-
-            if (parse_result.error() == protocol::ParseError::Incomplete) {
-                return false;
-            }
-
+        bool parse_error = false;
+        const bool done = parseRepliesFromRingBuffer(
+            *m_client->m_buffer_provider,
+            m_client->m_parser,
+            m_parse_buffer,
+            m_expected_replies,
+            m_values,
+            parse_error);
+        if (parse_error) {
             setParseError();
             return true;
         }
-        return true;
+        return done;
     }
 
     void RedisClientAwaitable::setSendError(const IOError& io_error)
@@ -462,8 +619,7 @@ namespace galay::redis
     // ======================== RedisPipelineAwaitable 实现 ========================
 
     RedisPipelineAwaitable::ProtocolSendAwaitable::ProtocolSendAwaitable(RedisPipelineAwaitable* owner)
-        : SendAwaitable(owner && owner->m_client ? owner->m_client->m_socket.controller() : nullptr,
-                        nullptr, 0)
+        : WritevIOContext(std::span<const struct iovec>())
         , m_owner(owner)
     {
         rebind(owner);
@@ -472,27 +628,112 @@ namespace galay::redis
     void RedisPipelineAwaitable::ProtocolSendAwaitable::rebind(RedisPipelineAwaitable* owner)
     {
         m_owner = owner;
-        m_controller = (m_owner && m_owner->m_client) ? m_owner->m_client->m_socket.controller() : nullptr;
-        if (m_owner) {
-            m_buffer = m_owner->m_encoded_batch.data();
-            m_length = m_owner->m_encoded_batch.size();
-        } else {
-            m_buffer = nullptr;
-            m_length = 0;
+        m_iov_cursor = 0;
+        m_next_command_index = 0;
+        m_iovecs.clear();
+        if (!m_owner) {
+            return;
         }
+
+        const size_t reserve_hint = m_owner->m_encoded_slices.size() <
+                                            static_cast<size_t>(kPipelineWritevMaxIov)
+                                        ? m_owner->m_encoded_slices.size()
+                                        : static_cast<size_t>(kPipelineWritevMaxIov);
+        m_iovecs.reserve(reserve_hint);
+        refillIovWindow();
+    }
+
+    void RedisPipelineAwaitable::ProtocolSendAwaitable::refillIovWindow()
+    {
+        if (!m_owner) {
+            m_iovecs.clear();
+            m_iov_cursor = 0;
+            return;
+        }
+
+        if (m_iov_cursor > 0) {
+            m_iovecs.erase(
+                m_iovecs.begin(),
+                m_iovecs.begin() + static_cast<std::vector<struct iovec>::difference_type>(m_iov_cursor));
+            m_iov_cursor = 0;
+        }
+
+        while (m_iovecs.size() < static_cast<size_t>(kPipelineWritevMaxIov) &&
+               m_next_command_index < m_owner->m_encoded_slices.size()) {
+            const auto encoded_slice = m_owner->m_encoded_slices[m_next_command_index++];
+            if (encoded_slice.length == 0) {
+                continue;
+            }
+
+            struct iovec iov;
+            iov.iov_base = const_cast<char*>(m_owner->m_encoded_buffer.data() + encoded_slice.offset);
+            iov.iov_len = encoded_slice.length;
+            m_iovecs.push_back(iov);
+        }
+    }
+
+    int RedisPipelineAwaitable::ProtocolSendAwaitable::pendingIovCount()
+    {
+        while (m_iov_cursor < m_iovecs.size() && m_iovecs[m_iov_cursor].iov_len == 0) {
+            ++m_iov_cursor;
+        }
+
+        if (m_iov_cursor >= m_iovecs.size()) {
+            refillIovWindow();
+            while (m_iov_cursor < m_iovecs.size() && m_iovecs[m_iov_cursor].iov_len == 0) {
+                ++m_iov_cursor;
+            }
+        }
+
+        if (m_iov_cursor >= m_iovecs.size()) {
+            return 0;
+        }
+
+        return static_cast<int>(m_iovecs.size() - m_iov_cursor);
+    }
+
+    bool RedisPipelineAwaitable::ProtocolSendAwaitable::advanceAfterWrite(size_t sent_bytes)
+    {
+        size_t remaining = sent_bytes;
+        while (remaining > 0 && m_iov_cursor < m_iovecs.size()) {
+            auto& iov = m_iovecs[m_iov_cursor];
+            if (iov.iov_len == 0) {
+                ++m_iov_cursor;
+                continue;
+            }
+
+            if (remaining < iov.iov_len) {
+                iov.iov_base = static_cast<char*>(iov.iov_base) + remaining;
+                iov.iov_len -= remaining;
+                return true;
+            }
+
+            remaining -= iov.iov_len;
+            iov.iov_len = 0;
+            ++m_iov_cursor;
+        }
+
+        if (remaining != 0) {
+            return false;
+        }
+
+        if (m_iov_cursor >= m_iovecs.size()) {
+            refillIovWindow();
+        }
+        return true;
     }
 
 #ifdef USE_IOURING
     bool RedisPipelineAwaitable::ProtocolSendAwaitable::handleComplete(struct io_uring_cqe* cqe, GHandle)
     {
-        if (m_length == 0) {
+        if (pendingIovCount() == 0) {
             return true;
         }
         if (cqe == nullptr) {
             return false;
         }
 
-        auto result = galay::kernel::io::handleSend(cqe);
+        auto result = galay::kernel::io::handleWritev(cqe);
         if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
             return false;
         }
@@ -506,15 +747,24 @@ namespace galay::redis
             return false;
         }
 
-        m_buffer += sent;
-        m_length -= sent;
-        return m_length == 0;
+        if (!advanceAfterWrite(sent)) {
+            m_owner->setSendError(IOError(galay::kernel::kSendFailed, 0));
+            return true;
+        }
+        return pendingIovCount() == 0;
     }
 #else
     bool RedisPipelineAwaitable::ProtocolSendAwaitable::handleComplete(GHandle handle)
     {
-        while (m_length > 0) {
-            auto result = galay::kernel::io::handleSend(handle, m_buffer, m_length);
+        while (true) {
+            const int iov_count = pendingIovCount();
+            if (iov_count == 0) {
+                return true;
+            }
+
+            auto result = galay::kernel::io::handleWritev(handle,
+                                                          m_iovecs.data() + m_iov_cursor,
+                                                          iov_count);
             if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
                 return false;
             }
@@ -528,41 +778,49 @@ namespace galay::redis
                 return false;
             }
 
-            m_buffer += sent;
-            m_length -= sent;
+            if (!advanceAfterWrite(sent)) {
+                m_owner->setSendError(IOError(galay::kernel::kSendFailed, 0));
+                return true;
+            }
         }
-        return true;
     }
 #endif
 
     RedisPipelineAwaitable::ProtocolRecvAwaitable::ProtocolRecvAwaitable(RedisPipelineAwaitable* owner)
-        : RecvAwaitable(owner && owner->m_client ? owner->m_client->m_socket.controller() : nullptr,
-                        nullptr, 0)
+        : ReadvIOContext(std::span<const struct iovec>())
         , m_owner(owner)
     {
+        m_iovecs.reserve(2);
         rebind(owner);
     }
 
     void RedisPipelineAwaitable::ProtocolRecvAwaitable::rebind(RedisPipelineAwaitable* owner)
     {
         m_owner = owner;
-        m_controller = (m_owner && m_owner->m_client) ? m_owner->m_client->m_socket.controller() : nullptr;
-        m_buffer = nullptr;
-        m_length = 0;
+        m_iovecs.clear();
     }
 
     bool RedisPipelineAwaitable::ProtocolRecvAwaitable::prepareRecvWindow()
     {
+        if (!m_owner || !m_owner->m_client) {
+            return false;
+        }
+
         struct iovec write_iovecs[2];
         const size_t write_iovec_count =
-            m_owner->m_client->m_ring_buffer.getWriteIovecs(write_iovecs, 2);
+            m_owner->m_client->m_buffer_provider->getWriteIovecs(write_iovecs, 2);
         if (write_iovec_count == 0) {
             return false;
         }
 
-        m_buffer = static_cast<char*>(write_iovecs[0].iov_base);
-        m_length = write_iovecs[0].iov_len;
-        return m_length > 0;
+        m_iovecs.clear();
+        for (size_t i = 0; i < write_iovec_count; ++i) {
+            if (write_iovecs[i].iov_len == 0) {
+                continue;
+            }
+            m_iovecs.push_back(write_iovecs[i]);
+        }
+        return !m_iovecs.empty();
     }
 
 #ifdef USE_IOURING
@@ -580,7 +838,7 @@ namespace galay::redis
             return false;
         }
 
-        auto result = galay::kernel::io::handleRecv(cqe, m_buffer);
+        auto result = galay::kernel::io::handleReadv(cqe);
         if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
             return false;
         }
@@ -589,13 +847,13 @@ namespace galay::redis
             return true;
         }
 
-        const size_t recv_bytes = result.value().size();
+        const size_t recv_bytes = result.value();
         if (recv_bytes == 0) {
             m_owner->setConnectionClosedError();
             return true;
         }
 
-        m_owner->m_client->m_ring_buffer.produce(recv_bytes);
+        m_owner->m_client->m_buffer_provider->produce(recv_bytes);
         if (m_owner->parseResponsesFromRingBuffer()) {
             return true;
         }
@@ -619,7 +877,9 @@ namespace galay::redis
                 return true;
             }
 
-            auto result = galay::kernel::io::handleRecv(handle, m_buffer, m_length);
+            auto result = galay::kernel::io::handleReadv(handle,
+                                                         m_iovecs.data(),
+                                                         static_cast<int>(m_iovecs.size()));
             if (!result && IOError::contains(result.error().code(), galay::kernel::kNotReady)) {
                 return false;
             }
@@ -628,13 +888,13 @@ namespace galay::redis
                 return true;
             }
 
-            const size_t recv_bytes = result.value().size();
+            const size_t recv_bytes = result.value();
             if (recv_bytes == 0) {
                 m_owner->setConnectionClosedError();
                 return true;
             }
 
-            m_owner->m_client->m_ring_buffer.produce(recv_bytes);
+            m_owner->m_client->m_buffer_provider->produce(recv_bytes);
             if (m_owner->parseResponsesFromRingBuffer()) {
                 return true;
             }
@@ -643,7 +903,7 @@ namespace galay::redis
 #endif
 
     RedisPipelineAwaitable::RedisPipelineAwaitable(RedisClient& client,
-                                                   std::vector<std::vector<std::string>> commands)
+                                                   std::span<const RedisCommandView> commands)
         : CustomAwaitable(client.m_socket.controller())
         , m_client(&client)
         , m_expected_replies(commands.size())
@@ -653,14 +913,26 @@ namespace galay::redis
         , m_result(std::nullopt)
     {
         m_values.reserve(m_expected_replies);
-        size_t estimated_batch_size = 0;
-        for (const auto& cmd_parts : commands) {
-            estimated_batch_size += estimateRespCommandBytes(cmd_parts);
+        static thread_local protocol::RespEncoder encoder;
+        size_t encoded_bytes = 0;
+        for (const auto& cmd_view : commands) {
+            if (!cmd_view.encoded.empty()) {
+                encoded_bytes += cmd_view.encoded.size();
+            } else {
+                encoded_bytes += estimateRespCommandBytes(cmd_view.command, cmd_view.args);
+            }
         }
-        m_encoded_batch.reserve(estimated_batch_size);
 
-        for (const auto& cmd_parts : commands) {
-            m_client->m_encoder.appendCommand(m_encoded_batch, cmd_parts);
+        m_encoded_buffer.reserve(encoded_bytes);
+        m_encoded_slices.reserve(commands.size());
+        for (const auto& cmd_view : commands) {
+            const size_t offset = m_encoded_buffer.size();
+            if (!cmd_view.encoded.empty()) {
+                m_encoded_buffer.append(cmd_view.encoded.data(), cmd_view.encoded.size());
+            } else {
+                encoder.appendCommandFast(m_encoded_buffer, cmd_view.command, cmd_view.args);
+            }
+            m_encoded_slices.push_back(EncodedSlice{offset, m_encoded_buffer.size() - offset});
         }
 
         m_send_awaitable.rebind(this);
@@ -693,7 +965,8 @@ namespace galay::redis
 
         m_client = other.m_client;
         m_expected_replies = other.m_expected_replies;
-        m_encoded_batch = std::move(other.m_encoded_batch);
+        m_encoded_buffer = std::move(other.m_encoded_buffer);
+        m_encoded_slices = std::move(other.m_encoded_slices);
         m_parse_buffer = std::move(other.m_parse_buffer);
         m_values = std::move(other.m_values);
         m_state = other.m_state;
@@ -721,6 +994,8 @@ namespace galay::redis
         m_cursor = 0;
         m_internal_error.reset();
         m_values.clear();
+        m_encoded_buffer.clear();
+        m_encoded_slices.clear();
         m_parse_buffer.clear();
         m_result = std::nullopt;
         m_send_awaitable.rebind(this);
@@ -731,42 +1006,25 @@ namespace galay::redis
     {
         m_tasks.clear();
         m_cursor = 0;
-        addTask(IOEventType::SEND, &m_send_awaitable);
-        addTask(IOEventType::RECV, &m_recv_awaitable);
+        addTask(IOEventType::WRITEV, &m_send_awaitable);
+        addTask(IOEventType::READV, &m_recv_awaitable);
     }
 
     bool RedisPipelineAwaitable::parseResponsesFromRingBuffer()
     {
-        struct iovec read_iovecs[2];
-        while (m_values.size() < m_expected_replies) {
-            const size_t read_iovec_count = m_client->m_ring_buffer.getReadIovecs(read_iovecs, 2);
-            if (read_iovec_count == 0) {
-                return false;
-            }
-
-            size_t len = 0;
-            const char* data = prepareParseInput(read_iovecs, read_iovec_count, m_parse_buffer, len);
-            if (data == nullptr) {
-                return false;
-            }
-
-            protocol::RedisReply reply;
-            auto parse_result = m_client->m_parser.parseFast(data, len, &reply);
-            if (parse_result) {
-                const auto consumed = parse_result.value();
-                m_client->m_ring_buffer.consume(consumed);
-                m_values.emplace_back(std::move(reply));
-                continue;
-            }
-
-            if (parse_result.error() == protocol::ParseError::Incomplete) {
-                return false;
-            }
-
+        bool parse_error = false;
+        const bool done = parseRepliesFromRingBuffer(
+            *m_client->m_buffer_provider,
+            m_client->m_parser,
+            m_parse_buffer,
+            m_expected_replies,
+            m_values,
+            parse_error);
+        if (parse_error) {
             setParseError();
             return true;
         }
-        return true;
+        return done;
     }
 
     void RedisPipelineAwaitable::setSendError(const IOError& io_error)
@@ -872,35 +1130,27 @@ namespace galay::redis
             m_state = State::Authenticating;
 
             // 编码认证命令（避免构造临时 vector）
-            m_encoded_cmd.clear();
+            RedisCommandBuilder builder;
             if (m_username.empty()) {
-                m_client->m_encoder.appendCommand(
-                    m_encoded_cmd,
-                    "AUTH",
-                    {std::string_view(m_password)}
-                );
+                m_encoded_cmd = std::move(builder.auth(m_password).encoded);
             } else {
-                m_client->m_encoder.appendCommand(
-                    m_encoded_cmd,
-                    "AUTH",
-                    {std::string_view(m_username), std::string_view(m_password)}
-                );
+                m_encoded_cmd = std::move(builder.auth(m_username, m_password).encoded);
             }
             m_sent = 0;
 
             // 发送认证命令
-            m_send_awaitable.emplace(m_client->m_socket.send(
-                m_encoded_cmd.c_str(),
-                m_encoded_cmd.size()
-            ));
+            m_send_iovec[0].iov_base = const_cast<char*>(m_encoded_cmd.data());
+            m_send_iovec[0].iov_len = m_encoded_cmd.size();
+            m_send_awaitable.emplace(
+                m_client->m_socket.writev(std::span<const struct iovec>(m_send_iovec.data(), 1)));
             return m_send_awaitable->await_suspend(handle);
         }
         else if (m_state == State::Authenticating) {
             // 继续发送认证命令（如果未完成）
-            m_send_awaitable.emplace(m_client->m_socket.send(
-                m_encoded_cmd.c_str() + m_sent,
-                m_encoded_cmd.size() - m_sent
-            ));
+            m_send_iovec[0].iov_base = const_cast<char*>(m_encoded_cmd.data() + m_sent);
+            m_send_iovec[0].iov_len = m_encoded_cmd.size() - m_sent;
+            m_send_awaitable.emplace(
+                m_client->m_socket.writev(std::span<const struct iovec>(m_send_iovec.data(), 1)));
             return m_send_awaitable->await_suspend(handle);
         }
         else if (m_state == State::SelectingDB) {
@@ -912,19 +1162,14 @@ namespace galay::redis
             }
 
             // 发送 SELECT 命令
-            m_encoded_cmd.clear();
-            const std::string db_index_str = std::to_string(m_db_index);
-            m_client->m_encoder.appendCommand(
-                m_encoded_cmd,
-                "SELECT",
-                {std::string_view(db_index_str)}
-            );
+            RedisCommandBuilder builder;
+            m_encoded_cmd = std::move(builder.select(m_db_index).encoded);
             m_sent = 0;
 
-            m_send_awaitable.emplace(m_client->m_socket.send(
-                m_encoded_cmd.c_str(),
-                m_encoded_cmd.size()
-            ));
+            m_send_iovec[0].iov_base = const_cast<char*>(m_encoded_cmd.data());
+            m_send_iovec[0].iov_len = m_encoded_cmd.size();
+            m_send_awaitable.emplace(
+                m_client->m_socket.writev(std::span<const struct iovec>(m_send_iovec.data(), 1)));
             return m_send_awaitable->await_suspend(handle);
         }
 
@@ -994,8 +1239,18 @@ namespace galay::redis
             }
 
             // 发送完成，接收认证响应
-            auto iovecs = m_client->m_ring_buffer.getWriteIovecs();
-            m_recv_awaitable.emplace(m_client->m_socket.readv(std::move(iovecs)));
+            const size_t recv_iovec_count =
+                m_client->m_buffer_provider->getWriteIovecs(m_recv_iovecs.data(), m_recv_iovecs.size());
+            if (recv_iovec_count == 0) {
+                RedisLogDebug(m_client->m_logger, "Ring buffer has no writable iovec for AUTH response");
+                m_state = State::Invalid;
+                m_send_awaitable.reset();
+                return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_BUFFER_OVERFLOW_ERROR,
+                                                         "No writable iovec for AUTH response"));
+            }
+            m_recv_awaitable.emplace(
+                m_client->m_socket.readv(std::span<const struct iovec>(m_recv_iovecs.data(),
+                                                                        recv_iovec_count)));
             m_recv_awaitable->await_suspend(std::coroutine_handle<>::from_address(nullptr));
             m_recv_awaitable->await_resume();
 
@@ -1018,11 +1273,11 @@ namespace galay::redis
                                                          "Connection closed"));
             }
 
-            m_client->m_ring_buffer.produce(n);
+            m_client->m_buffer_provider->produce(n);
 
             // 解析认证响应
             struct iovec read_iovecs[2];
-            const size_t read_iovec_count = m_client->m_ring_buffer.getReadIovecs(read_iovecs, 2);
+            const size_t read_iovec_count = m_client->m_buffer_provider->getReadIovecs(read_iovecs, 2);
             if (read_iovec_count == 0) {
                 RedisLogDebug(m_client->m_logger, "AUTH response incomplete");
                 return {};  // 继续接收
@@ -1048,7 +1303,7 @@ namespace galay::redis
                                                          "Parse AUTH response error"));
             }
 
-            m_client->m_ring_buffer.consume(parse_result.value());
+            m_client->m_buffer_provider->consume(parse_result.value());
 
             // 检查认证结果
             if (value.isError()) {
@@ -1092,8 +1347,18 @@ namespace galay::redis
             }
 
             // 发送完成，接收 SELECT 响应
-            auto iovecs = m_client->m_ring_buffer.getWriteIovecs();
-            m_recv_awaitable.emplace(m_client->m_socket.readv(std::move(iovecs)));
+            const size_t recv_iovec_count =
+                m_client->m_buffer_provider->getWriteIovecs(m_recv_iovecs.data(), m_recv_iovecs.size());
+            if (recv_iovec_count == 0) {
+                RedisLogDebug(m_client->m_logger, "Ring buffer has no writable iovec for SELECT response");
+                m_state = State::Invalid;
+                m_send_awaitable.reset();
+                return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_BUFFER_OVERFLOW_ERROR,
+                                                         "No writable iovec for SELECT response"));
+            }
+            m_recv_awaitable.emplace(
+                m_client->m_socket.readv(std::span<const struct iovec>(m_recv_iovecs.data(),
+                                                                        recv_iovec_count)));
             m_recv_awaitable->await_suspend(std::coroutine_handle<>::from_address(nullptr));
             m_recv_awaitable->await_resume();
 
@@ -1116,11 +1381,11 @@ namespace galay::redis
                                                          "Connection closed"));
             }
 
-            m_client->m_ring_buffer.produce(n);
+            m_client->m_buffer_provider->produce(n);
 
             // 解析 SELECT 响应
             struct iovec read_iovecs[2];
-            const size_t read_iovec_count = m_client->m_ring_buffer.getReadIovecs(read_iovecs, 2);
+            const size_t read_iovec_count = m_client->m_buffer_provider->getReadIovecs(read_iovecs, 2);
             if (read_iovec_count == 0) {
                 RedisLogDebug(m_client->m_logger, "SELECT response incomplete");
                 return {};  // 继续接收
@@ -1146,7 +1411,7 @@ namespace galay::redis
                                                          "Parse SELECT response error"));
             }
 
-            m_client->m_ring_buffer.consume(parse_result.value());
+            m_client->m_buffer_provider->consume(parse_result.value());
 
             // 检查 SELECT 结果
             if (value.isError()) {
@@ -1179,9 +1444,16 @@ namespace galay::redis
 
     // ======================== RedisClient 实现 ========================
 
-    RedisClient::RedisClient(IOScheduler* scheduler, AsyncRedisConfig config)
-        : m_scheduler(scheduler), m_config(config), m_ring_buffer(config.buffer_size)
+    RedisClient::RedisClient(IOScheduler* scheduler,
+                             AsyncRedisConfig config,
+                             std::shared_ptr<RedisBufferProvider> buffer_provider)
+        : m_scheduler(scheduler)
+        , m_config(config)
+        , m_buffer_provider(std::move(buffer_provider))
     {
+        if (!m_buffer_provider) {
+            m_buffer_provider = std::make_shared<RedisRingBufferProvider>(config.buffer_size);
+        }
         m_logger = RedisLog::getInstance()->getLogger();
     }
 
@@ -1189,10 +1461,9 @@ namespace galay::redis
         : m_is_closed(other.m_is_closed)
         , m_socket(std::move(other.m_socket))
         , m_scheduler(other.m_scheduler)
-        , m_encoder(std::move(other.m_encoder))
         , m_parser(std::move(other.m_parser))
         , m_config(other.m_config)
-        , m_ring_buffer(std::move(other.m_ring_buffer))
+        , m_buffer_provider(std::move(other.m_buffer_provider))
         , m_logger(std::move(other.m_logger))
     {
         other.m_is_closed = true;
@@ -1204,10 +1475,9 @@ namespace galay::redis
             m_is_closed = other.m_is_closed;
             m_socket = std::move(other.m_socket);
             m_scheduler = other.m_scheduler;
-            m_encoder = std::move(other.m_encoder);
             m_parser = std::move(other.m_parser);
             m_config = other.m_config;
-            m_ring_buffer = std::move(other.m_ring_buffer);
+            m_buffer_provider = std::move(other.m_buffer_provider);
             m_logger = std::move(other.m_logger);
             other.m_is_closed = true;
         }
@@ -1216,253 +1486,23 @@ namespace galay::redis
 
     // ======================== 命令方法 ========================
 
-    RedisClientAwaitable RedisClient::execute(const std::string& cmd, const std::vector<std::string>& args)
+    RedisClientAwaitable RedisClient::command(RedisEncodedCommand command_packet)
     {
-        return execute(cmd, args, 1);
-    }
-
-    RedisClientAwaitable RedisClient::execute(const std::string& cmd,
-                                               const std::vector<std::string>& args,
-                                               size_t expected_replies)
-    {
-        return RedisClientAwaitable(*this, cmd, args, expected_replies, false);
+        return RedisClientAwaitable(
+            *this,
+            std::move(command_packet.encoded),
+            command_packet.expected_replies,
+            false);
     }
 
     RedisClientAwaitable RedisClient::receive(size_t expected_replies)
     {
-        return RedisClientAwaitable(*this, "", std::vector<std::string>{}, expected_replies, true);
+        return RedisClientAwaitable(*this, std::string(), expected_replies, true);
     }
 
-    RedisClientAwaitable RedisClient::auth(const std::string& password) {
-        return execute("AUTH", {password});
-    }
-
-    RedisClientAwaitable RedisClient::auth(const std::string& username, const std::string& password) {
-        return execute("AUTH", {username, password});
-    }
-
-    RedisClientAwaitable RedisClient::select(int32_t db_index) {
-        return execute("SELECT", {std::to_string(db_index)});
-    }
-
-    RedisClientAwaitable RedisClient::ping() {
-        return execute("PING", {});
-    }
-
-    RedisClientAwaitable RedisClient::echo(const std::string& message) {
-        return execute("ECHO", {message});
-    }
-
-    RedisClientAwaitable RedisClient::publish(const std::string& channel, const std::string& message)
-    {
-        return execute("PUBLISH", {channel, message});
-    }
-
-    RedisClientAwaitable RedisClient::subscribe(const std::string& channel)
-    {
-        return execute("SUBSCRIBE", {channel}, 1);
-    }
-
-    RedisClientAwaitable RedisClient::subscribe(const std::vector<std::string>& channels)
-    {
-        if (channels.empty()) {
-            return execute("SUBSCRIBE", {}, 1);
-        }
-        return execute("SUBSCRIBE", channels, channels.size());
-    }
-
-    RedisClientAwaitable RedisClient::unsubscribe(const std::string& channel)
-    {
-        return execute("UNSUBSCRIBE", {channel}, 1);
-    }
-
-    RedisClientAwaitable RedisClient::unsubscribe(const std::vector<std::string>& channels)
-    {
-        if (channels.empty()) {
-            return execute("UNSUBSCRIBE", {}, 1);
-        }
-        return execute("UNSUBSCRIBE", channels, channels.size());
-    }
-
-    RedisClientAwaitable RedisClient::psubscribe(const std::string& pattern)
-    {
-        return execute("PSUBSCRIBE", {pattern}, 1);
-    }
-
-    RedisClientAwaitable RedisClient::psubscribe(const std::vector<std::string>& patterns)
-    {
-        if (patterns.empty()) {
-            return execute("PSUBSCRIBE", {}, 1);
-        }
-        return execute("PSUBSCRIBE", patterns, patterns.size());
-    }
-
-    RedisClientAwaitable RedisClient::punsubscribe(const std::string& pattern)
-    {
-        return execute("PUNSUBSCRIBE", {pattern}, 1);
-    }
-
-    RedisClientAwaitable RedisClient::punsubscribe(const std::vector<std::string>& patterns)
-    {
-        if (patterns.empty()) {
-            return execute("PUNSUBSCRIBE", {}, 1);
-        }
-        return execute("PUNSUBSCRIBE", patterns, patterns.size());
-    }
-
-    RedisClientAwaitable RedisClient::role()
-    {
-        return execute("ROLE", {});
-    }
-
-    RedisClientAwaitable RedisClient::replicaof(const std::string& host, int32_t port)
-    {
-        return execute("REPLICAOF", {host, std::to_string(port)});
-    }
-
-    RedisClientAwaitable RedisClient::readonly()
-    {
-        return execute("READONLY", {});
-    }
-
-    RedisClientAwaitable RedisClient::readwrite()
-    {
-        return execute("READWRITE", {});
-    }
-
-    RedisClientAwaitable RedisClient::clusterInfo()
-    {
-        return execute("CLUSTER", {"INFO"});
-    }
-
-    RedisClientAwaitable RedisClient::clusterNodes()
-    {
-        return execute("CLUSTER", {"NODES"});
-    }
-
-    RedisClientAwaitable RedisClient::clusterSlots()
-    {
-        return execute("CLUSTER", {"SLOTS"});
-    }
-
-    RedisClientAwaitable RedisClient::get(const std::string& key) {
-        return execute("GET", {key});
-    }
-
-    RedisClientAwaitable RedisClient::set(const std::string& key, const std::string& value) {
-        return execute("SET", {key, value});
-    }
-
-    RedisClientAwaitable RedisClient::setex(const std::string& key, int64_t seconds, const std::string& value) {
-        return execute("SETEX", {key, std::to_string(seconds), value});
-    }
-
-    RedisClientAwaitable RedisClient::del(const std::string& key) {
-        return execute("DEL", {key});
-    }
-
-    RedisClientAwaitable RedisClient::exists(const std::string& key) {
-        return execute("EXISTS", {key});
-    }
-
-    RedisClientAwaitable RedisClient::incr(const std::string& key) {
-        return execute("INCR", {key});
-    }
-
-    RedisClientAwaitable RedisClient::decr(const std::string& key) {
-        return execute("DECR", {key});
-    }
-
-    RedisClientAwaitable RedisClient::hget(const std::string& key, const std::string& field) {
-        return execute("HGET", {key, field});
-    }
-
-    RedisClientAwaitable RedisClient::hset(const std::string& key, const std::string& field, const std::string& value) {
-        return execute("HSET", {key, field, value});
-    }
-
-    RedisClientAwaitable RedisClient::hdel(const std::string& key, const std::string& field) {
-        return execute("HDEL", {key, field});
-    }
-
-    RedisClientAwaitable RedisClient::hgetAll(const std::string& key) {
-        return execute("HGETALL", {key});
-    }
-
-    RedisClientAwaitable RedisClient::lpush(const std::string& key, const std::string& value) {
-        return execute("LPUSH", {key, value});
-    }
-
-    RedisClientAwaitable RedisClient::rpush(const std::string& key, const std::string& value) {
-        return execute("RPUSH", {key, value});
-    }
-
-    RedisClientAwaitable RedisClient::lpop(const std::string& key) {
-        return execute("LPOP", {key});
-    }
-
-    RedisClientAwaitable RedisClient::rpop(const std::string& key) {
-        return execute("RPOP", {key});
-    }
-
-    RedisClientAwaitable RedisClient::llen(const std::string& key) {
-        return execute("LLEN", {key});
-    }
-
-    RedisClientAwaitable RedisClient::lrange(const std::string& key, int64_t start, int64_t stop) {
-        return execute("LRANGE", {key, std::to_string(start), std::to_string(stop)});
-    }
-
-    RedisClientAwaitable RedisClient::sadd(const std::string& key, const std::string& member) {
-        return execute("SADD", {key, member});
-    }
-
-    RedisClientAwaitable RedisClient::srem(const std::string& key, const std::string& member) {
-        return execute("SREM", {key, member});
-    }
-
-    RedisClientAwaitable RedisClient::smembers(const std::string& key) {
-        return execute("SMEMBERS", {key});
-    }
-
-    RedisClientAwaitable RedisClient::scard(const std::string& key) {
-        return execute("SCARD", {key});
-    }
-
-    RedisClientAwaitable RedisClient::zadd(const std::string& key, double score, const std::string& member) {
-        return execute("ZADD", {key, std::to_string(score), member});
-    }
-
-    RedisClientAwaitable RedisClient::zrem(const std::string& key, const std::string& member) {
-        return execute("ZREM", {key, member});
-    }
-
-    RedisClientAwaitable RedisClient::zrange(const std::string& key, int64_t start, int64_t stop) {
-        return execute("ZRANGE", {key, std::to_string(start), std::to_string(stop)});
-    }
-
-    RedisClientAwaitable RedisClient::zscore(const std::string& key, const std::string& member) {
-        return execute("ZSCORE", {key, member});
-    }
-
-    RedisPipelineAwaitable RedisClient::pipeline(const std::vector<std::vector<std::string>>& commands)
+    RedisPipelineAwaitable RedisClient::batch(std::span<const RedisCommandView> commands)
     {
         return RedisPipelineAwaitable(*this, commands);
-    }
-
-    RedisPipelineAwaitable RedisClient::pipeline(std::vector<std::vector<std::string>>&& commands)
-    {
-        return RedisPipelineAwaitable(*this, std::move(commands));
-    }
-
-    RedisPipelineAwaitable RedisClient::batch(const std::vector<std::vector<std::string>>& commands)
-    {
-        return pipeline(commands);
-    }
-
-    RedisPipelineAwaitable RedisClient::batch(std::vector<std::vector<std::string>>&& commands)
-    {
-        return pipeline(std::move(commands));
     }
 
     // ======================== 连接方法 ========================
@@ -1510,26 +1550,25 @@ namespace galay::redis
             ip = host;
         }
 
-        return RedisConnectAwaitable(*this, ip, port, username, password, db_index, 2);
+        RedisConnectOptions options;
+        options.username = std::move(username);
+        options.password = std::move(password);
+        options.db_index = db_index;
+        options.version = 2;
+        return connect(ip, port, std::move(options));
     }
 
-    RedisConnectAwaitable RedisClient::connect(const std::string& ip, int32_t port,
-                                               const std::string& username, const std::string& password)
+    RedisConnectAwaitable RedisClient::connect(const std::string& ip,
+                                               int32_t port,
+                                               RedisConnectOptions options)
     {
-        return RedisConnectAwaitable(*this, ip, port, username, password, 0, 2);
-    }
-
-    RedisConnectAwaitable RedisClient::connect(const std::string& ip, int32_t port,
-                                               const std::string& username, const std::string& password,
-                                               int32_t db_index)
-    {
-        return RedisConnectAwaitable(*this, ip, port, username, password, db_index, 2);
-    }
-
-    RedisConnectAwaitable RedisClient::connect(const std::string& ip, int32_t port,
-                                               const std::string& username, const std::string& password,
-                                               int32_t db_index, int version)
-    {
-        return RedisConnectAwaitable(*this, ip, port, username, password, db_index, version);
+        return RedisConnectAwaitable(
+            *this,
+            ip,
+            port,
+            std::move(options.username),
+            std::move(options.password),
+            options.db_index,
+            options.version);
     }
 }

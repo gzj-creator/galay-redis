@@ -114,23 +114,23 @@ int main()
 
 ```bash
 # 功能测试
-./build/test/test_redis_client_timeout
+./build/test/T5-redis_client_timeout
 
 # 连接池/协议等其他测试
-./build/test/test_async
+./build/test/T1-async
 ```
 
 ## 运行示例（examples/E*）
 
 ```bash
 # E1：基础异步 SET/GET/DEL
-./build/examples/E1-AsyncBasicDemo 127.0.0.1 6379
+./build/examples/E1-async_basic_demo 127.0.0.1 6379
 
 # E2：Pipeline 示例
-./build/examples/E2-PipelineDemo 127.0.0.1 6379 demo:pipeline: 20
+./build/examples/E2-pipeline_demo 127.0.0.1 6379 demo:pipeline: 20
 
 # E3：拓扑 + Pub/Sub 示例（单机也可演示）
-./build/examples/E3-TopologyPubSubDemo 127.0.0.1 6379
+./build/examples/E3-topology_pubsub_demo 127.0.0.1 6379
 ```
 
 ## 运行压测（benchmark/B*）

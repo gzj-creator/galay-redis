@@ -3,6 +3,7 @@
 #include <iostream>
 #include <chrono>
 #include <atomic>
+#include <array>
 #include <vector>
 #include <thread>
 #include <mutex>
@@ -31,6 +32,7 @@ void markClientCompleted()
 Coroutine benchmarkClient(IOScheduler* scheduler, int client_id, int operations_per_client, bool verbose)
 {
     auto client = RedisClientBuilder().scheduler(scheduler).build();
+    RedisCommandBuilder command_builder;
 
     // 连接到Redis服务器
     auto connect_result = co_await client.connect("127.0.0.1", 6379);
@@ -57,7 +59,8 @@ Coroutine benchmarkClient(IOScheduler* scheduler, int client_id, int operations_
         std::string value = "value_" + std::to_string(i);
 
         // SET操作
-        auto set_result = co_await client.set(key, value).timeout(std::chrono::seconds(5));
+        auto set_result = co_await client.command(command_builder.set(key, value))
+                              .timeout(std::chrono::seconds(5));
         if (set_result && set_result.value()) {
             ++local_success;
         } else if (!set_result) {
@@ -69,7 +72,8 @@ Coroutine benchmarkClient(IOScheduler* scheduler, int client_id, int operations_
         }
 
         // GET操作
-        auto get_result = co_await client.get(key).timeout(std::chrono::seconds(5));
+        auto get_result = co_await client.command(command_builder.get(key))
+                              .timeout(std::chrono::seconds(5));
         if (get_result && get_result.value()) {
             ++local_success;
         } else if (!get_result) {
@@ -122,18 +126,18 @@ Coroutine benchmarkPipeline(IOScheduler* scheduler, int client_id, int batch_siz
     int local_timeout = 0;
 
     for (int batch = 0; batch < batches; ++batch) {
-        std::vector<std::vector<std::string>> commands;
-        commands.reserve(batch_size);
+        RedisCommandBuilder builder;
+        builder.reserve(static_cast<size_t>(batch_size), static_cast<size_t>(batch_size) * 2U, 96U * static_cast<size_t>(batch_size));
 
         // 构建批量命令
         for (int i = 0; i < batch_size; ++i) {
             std::string key = "pipeline_" + std::to_string(client_id) + "_" + std::to_string(batch * batch_size + i);
             std::string value = "value_" + std::to_string(i);
-            commands.push_back({"SET", key, value});
+            builder.append("SET", std::array<std::string_view, 2>{key, value});
         }
 
         // 执行Pipeline
-        auto result = co_await client.pipeline(commands);
+        auto result = co_await client.batch(builder.commands());
         if (result && result.value()) {
             local_success += batch_size;
         } else if (!result) {
