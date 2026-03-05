@@ -2,3 +2,7 @@ build
 .cache
 .claude/
 build*/
+
+# Redis data files
+dump.rdb
+*.rdb
