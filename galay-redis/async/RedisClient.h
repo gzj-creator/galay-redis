@@ -143,8 +143,10 @@ namespace galay::redis
         private:
             int pendingIovCount();
             bool advanceAfterWrite(size_t sent_bytes);
+            void syncContextIovecs();
 
             RedisClientAwaitable* m_owner;
+            std::vector<struct iovec> m_iovecs;
         };
 
         class ProtocolRecvAwaitable : public ReadvIOContext
@@ -162,8 +164,10 @@ namespace galay::redis
 
         private:
             bool prepareRecvWindow();
+            void syncContextIovecs();
 
             RedisClientAwaitable* m_owner;
+            std::vector<struct iovec> m_iovecs;
         };
 
         /**
@@ -277,10 +281,12 @@ namespace galay::redis
             void refillIovWindow();
             int pendingIovCount();
             bool advanceAfterWrite(size_t sent_bytes);
+            void syncContextIovecs();
 
             RedisPipelineAwaitable* m_owner;
             size_t m_iov_cursor = 0;
             size_t m_next_command_index = 0;
+            std::vector<struct iovec> m_iovecs;
         };
 
         class ProtocolRecvAwaitable : public ReadvIOContext
@@ -298,8 +304,10 @@ namespace galay::redis
 
         private:
             bool prepareRecvWindow();
+            void syncContextIovecs();
 
             RedisPipelineAwaitable* m_owner;
+            std::vector<struct iovec> m_iovecs;
         };
 
         RedisPipelineAwaitable(RedisClient& client,

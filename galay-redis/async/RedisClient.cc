@@ -3,6 +3,7 @@
 #include "base/RedisLog.h"
 #include <galay-utils/system/System.hpp>
 #include <sys/uio.h>
+#include <array>
 #include <regex>
 
 namespace galay::redis
@@ -55,6 +56,12 @@ namespace galay::redis
 #else
         constexpr int kPipelineWritevMaxIov = 1024;
 #endif
+
+        std::array<struct iovec, 1>& emptyIovecs()
+        {
+            static std::array<struct iovec, 1> empty{};
+            return empty;
+        }
 
         const char* prepareParseInput(const struct iovec* read_iovecs,
                                       size_t read_iovec_count,
@@ -222,10 +229,15 @@ namespace galay::redis
     // ======================== RedisClientAwaitable 实现 ========================
 
     RedisClientAwaitable::ProtocolSendAwaitable::ProtocolSendAwaitable(RedisClientAwaitable* owner)
-        : WritevIOContext(std::span<const struct iovec>())
+        : WritevIOContext(emptyIovecs(), 0)
         , m_owner(owner)
     {
         rebind(owner);
+    }
+
+    void RedisClientAwaitable::ProtocolSendAwaitable::syncContextIovecs()
+    {
+        WritevIOContext::m_iovecs = std::span<const struct iovec>(m_iovecs.data(), m_iovecs.size());
     }
 
     void RedisClientAwaitable::ProtocolSendAwaitable::rebind(RedisClientAwaitable* owner)
@@ -233,6 +245,7 @@ namespace galay::redis
         m_owner = owner;
         m_iovecs.clear();
         if (!m_owner || m_owner->m_encoded_cmd.empty()) {
+            syncContextIovecs();
             return;
         }
 
@@ -240,6 +253,7 @@ namespace galay::redis
         iov.iov_base = const_cast<char*>(m_owner->m_encoded_cmd.data());
         iov.iov_len = m_owner->m_encoded_cmd.size();
         m_iovecs.push_back(iov);
+        syncContextIovecs();
     }
 
     int RedisClientAwaitable::ProtocolSendAwaitable::pendingIovCount()
@@ -247,6 +261,7 @@ namespace galay::redis
         while (!m_iovecs.empty() && m_iovecs.front().iov_len == 0) {
             m_iovecs.erase(m_iovecs.begin());
         }
+        syncContextIovecs();
         return static_cast<int>(m_iovecs.size());
     }
 
@@ -258,12 +273,14 @@ namespace galay::redis
             if (remaining < iov.iov_len) {
                 iov.iov_base = static_cast<char*>(iov.iov_base) + remaining;
                 iov.iov_len -= remaining;
+                syncContextIovecs();
                 return true;
             }
 
             remaining -= iov.iov_len;
             m_iovecs.erase(m_iovecs.begin());
         }
+        syncContextIovecs();
         return remaining == 0;
     }
 
@@ -329,17 +346,23 @@ namespace galay::redis
 #endif
 
     RedisClientAwaitable::ProtocolRecvAwaitable::ProtocolRecvAwaitable(RedisClientAwaitable* owner)
-        : ReadvIOContext(std::span<const struct iovec>())
+        : ReadvIOContext(emptyIovecs(), 0)
         , m_owner(owner)
     {
         m_iovecs.reserve(2);
         rebind(owner);
     }
 
+    void RedisClientAwaitable::ProtocolRecvAwaitable::syncContextIovecs()
+    {
+        ReadvIOContext::m_iovecs = std::span<const struct iovec>(m_iovecs.data(), m_iovecs.size());
+    }
+
     void RedisClientAwaitable::ProtocolRecvAwaitable::rebind(RedisClientAwaitable* owner)
     {
         m_owner = owner;
         m_iovecs.clear();
+        syncContextIovecs();
     }
 
     bool RedisClientAwaitable::ProtocolRecvAwaitable::prepareRecvWindow()
@@ -362,6 +385,7 @@ namespace galay::redis
             }
             m_iovecs.push_back(write_iovecs[i]);
         }
+        syncContextIovecs();
         return !m_iovecs.empty();
     }
 
@@ -619,10 +643,21 @@ namespace galay::redis
     // ======================== RedisPipelineAwaitable 实现 ========================
 
     RedisPipelineAwaitable::ProtocolSendAwaitable::ProtocolSendAwaitable(RedisPipelineAwaitable* owner)
-        : WritevIOContext(std::span<const struct iovec>())
+        : WritevIOContext(emptyIovecs(), 0)
         , m_owner(owner)
     {
         rebind(owner);
+    }
+
+    void RedisPipelineAwaitable::ProtocolSendAwaitable::syncContextIovecs()
+    {
+        if (m_iov_cursor >= m_iovecs.size()) {
+            WritevIOContext::m_iovecs = std::span<const struct iovec>();
+            return;
+        }
+        WritevIOContext::m_iovecs = std::span<const struct iovec>(
+            m_iovecs.data() + m_iov_cursor,
+            m_iovecs.size() - m_iov_cursor);
     }
 
     void RedisPipelineAwaitable::ProtocolSendAwaitable::rebind(RedisPipelineAwaitable* owner)
@@ -632,6 +667,7 @@ namespace galay::redis
         m_next_command_index = 0;
         m_iovecs.clear();
         if (!m_owner) {
+            syncContextIovecs();
             return;
         }
 
@@ -641,6 +677,7 @@ namespace galay::redis
                                         : static_cast<size_t>(kPipelineWritevMaxIov);
         m_iovecs.reserve(reserve_hint);
         refillIovWindow();
+        syncContextIovecs();
     }
 
     void RedisPipelineAwaitable::ProtocolSendAwaitable::refillIovWindow()
@@ -648,6 +685,7 @@ namespace galay::redis
         if (!m_owner) {
             m_iovecs.clear();
             m_iov_cursor = 0;
+            syncContextIovecs();
             return;
         }
 
@@ -670,6 +708,7 @@ namespace galay::redis
             iov.iov_len = encoded_slice.length;
             m_iovecs.push_back(iov);
         }
+        syncContextIovecs();
     }
 
     int RedisPipelineAwaitable::ProtocolSendAwaitable::pendingIovCount()
@@ -686,9 +725,11 @@ namespace galay::redis
         }
 
         if (m_iov_cursor >= m_iovecs.size()) {
+            syncContextIovecs();
             return 0;
         }
 
+        syncContextIovecs();
         return static_cast<int>(m_iovecs.size() - m_iov_cursor);
     }
 
@@ -705,6 +746,7 @@ namespace galay::redis
             if (remaining < iov.iov_len) {
                 iov.iov_base = static_cast<char*>(iov.iov_base) + remaining;
                 iov.iov_len -= remaining;
+                syncContextIovecs();
                 return true;
             }
 
@@ -720,6 +762,7 @@ namespace galay::redis
         if (m_iov_cursor >= m_iovecs.size()) {
             refillIovWindow();
         }
+        syncContextIovecs();
         return true;
     }
 
@@ -787,17 +830,23 @@ namespace galay::redis
 #endif
 
     RedisPipelineAwaitable::ProtocolRecvAwaitable::ProtocolRecvAwaitable(RedisPipelineAwaitable* owner)
-        : ReadvIOContext(std::span<const struct iovec>())
+        : ReadvIOContext(emptyIovecs(), 0)
         , m_owner(owner)
     {
         m_iovecs.reserve(2);
         rebind(owner);
     }
 
+    void RedisPipelineAwaitable::ProtocolRecvAwaitable::syncContextIovecs()
+    {
+        ReadvIOContext::m_iovecs = std::span<const struct iovec>(m_iovecs.data(), m_iovecs.size());
+    }
+
     void RedisPipelineAwaitable::ProtocolRecvAwaitable::rebind(RedisPipelineAwaitable* owner)
     {
         m_owner = owner;
         m_iovecs.clear();
+        syncContextIovecs();
     }
 
     bool RedisPipelineAwaitable::ProtocolRecvAwaitable::prepareRecvWindow()
@@ -820,6 +869,7 @@ namespace galay::redis
             }
             m_iovecs.push_back(write_iovecs[i]);
         }
+        syncContextIovecs();
         return !m_iovecs.empty();
     }
 
@@ -1142,7 +1192,7 @@ namespace galay::redis
             m_send_iovec[0].iov_base = const_cast<char*>(m_encoded_cmd.data());
             m_send_iovec[0].iov_len = m_encoded_cmd.size();
             m_send_awaitable.emplace(
-                m_client->m_socket.writev(std::span<const struct iovec>(m_send_iovec.data(), 1)));
+                m_client->m_socket.writev(m_send_iovec, 1));
             return m_send_awaitable->await_suspend(handle);
         }
         else if (m_state == State::Authenticating) {
@@ -1150,7 +1200,7 @@ namespace galay::redis
             m_send_iovec[0].iov_base = const_cast<char*>(m_encoded_cmd.data() + m_sent);
             m_send_iovec[0].iov_len = m_encoded_cmd.size() - m_sent;
             m_send_awaitable.emplace(
-                m_client->m_socket.writev(std::span<const struct iovec>(m_send_iovec.data(), 1)));
+                m_client->m_socket.writev(m_send_iovec, 1));
             return m_send_awaitable->await_suspend(handle);
         }
         else if (m_state == State::SelectingDB) {
@@ -1169,7 +1219,7 @@ namespace galay::redis
             m_send_iovec[0].iov_base = const_cast<char*>(m_encoded_cmd.data());
             m_send_iovec[0].iov_len = m_encoded_cmd.size();
             m_send_awaitable.emplace(
-                m_client->m_socket.writev(std::span<const struct iovec>(m_send_iovec.data(), 1)));
+                m_client->m_socket.writev(m_send_iovec, 1));
             return m_send_awaitable->await_suspend(handle);
         }
 
@@ -1249,8 +1299,7 @@ namespace galay::redis
                                                          "No writable iovec for AUTH response"));
             }
             m_recv_awaitable.emplace(
-                m_client->m_socket.readv(std::span<const struct iovec>(m_recv_iovecs.data(),
-                                                                        recv_iovec_count)));
+                m_client->m_socket.readv(m_recv_iovecs, recv_iovec_count));
             m_recv_awaitable->await_suspend(std::coroutine_handle<>::from_address(nullptr));
             m_recv_awaitable->await_resume();
 
@@ -1357,8 +1406,7 @@ namespace galay::redis
                                                          "No writable iovec for SELECT response"));
             }
             m_recv_awaitable.emplace(
-                m_client->m_socket.readv(std::span<const struct iovec>(m_recv_iovecs.data(),
-                                                                        recv_iovec_count)));
+                m_client->m_socket.readv(m_recv_iovecs, recv_iovec_count));
             m_recv_awaitable->await_suspend(std::coroutine_handle<>::from_address(nullptr));
             m_recv_awaitable->await_resume();
 
