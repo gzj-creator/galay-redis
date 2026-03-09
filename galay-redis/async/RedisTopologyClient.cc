@@ -420,8 +420,12 @@ namespace galay::redis
             co_return;
         }
 
+        std::vector<std::string> master_query_args;
+        master_query_args.reserve(2);
+        master_query_args.emplace_back("get-master-addr-by-name");
+        master_query_args.push_back(m_sentinel_master_name);
         auto master_reply = co_await selected->client->command(
-            encodeCommand("SENTINEL", {"get-master-addr-by-name", m_sentinel_master_name}));
+            encodeCommand("SENTINEL", master_query_args));
         if (!master_reply) {
             notify_and_finish(std::unexpected(master_reply.error()));
             co_return;
@@ -450,22 +454,29 @@ namespace galay::redis
             m_master = std::make_unique<RedisClient>(m_scheduler, m_config);
         }
 
+        std::vector<std::string> replicas_query_args;
+        replicas_query_args.reserve(2);
+        replicas_query_args.emplace_back("replicas");
+        replicas_query_args.push_back(m_sentinel_master_name);
         auto replicas_reply = co_await selected->client->command(
-            encodeCommand("SENTINEL", {"replicas", m_sentinel_master_name}));
+            encodeCommand("SENTINEL", replicas_query_args));
         if (replicas_reply && replicas_reply.value().has_value()) {
             std::vector<RedisNodeAddress> parsed_replicas;
             if (parseReplicaListReply(replicas_reply.value().value(), &parsed_replicas)) {
-                m_replica_addresses = std::move(parsed_replicas);
-                m_replicas.clear();
-                m_replica_connected.clear();
-                m_replicas.reserve(m_replica_addresses.size());
-                m_replica_connected.reserve(m_replica_addresses.size());
-                for (const auto& addr : m_replica_addresses) {
+                auto next_replica_addresses = std::move(parsed_replicas);
+                std::vector<std::unique_ptr<RedisClient>> next_replicas;
+                std::vector<bool> next_replica_connected;
+                next_replicas.reserve(next_replica_addresses.size());
+                next_replica_connected.reserve(next_replica_addresses.size());
+                for (const auto& addr : next_replica_addresses) {
                     auto client = std::make_unique<RedisClient>(m_scheduler, m_config);
                     auto connect_res = co_await connectToAddress(client.get(), addr);
-                    m_replica_connected.push_back(connect_res.has_value());
-                    m_replicas.push_back(std::move(client));
+                    next_replica_connected.push_back(connect_res.has_value());
+                    next_replicas.push_back(std::move(client));
                 }
+                m_replica_addresses = std::move(next_replica_addresses);
+                m_replica_connected = std::move(next_replica_connected);
+                m_replicas = std::move(next_replicas);
             }
         }
 
