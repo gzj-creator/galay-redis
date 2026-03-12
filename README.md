@@ -1,197 +1,175 @@
 # galay-redis
 
-基于 C++20 协程的高性能异步 Redis 客户端库，属于 galay 生态。
+`galay-redis` 是 `galay` 生态中的 Redis 客户端库。当前仓库里，经过 `examples/`、`test/`、`benchmark/` 实际覆盖的主路径已经统一到：
 
-## 特性
+- 单命令：`RedisCommandBuilder` + `RedisClient::command(...)`
+- 批量发送：`RedisCommandBuilder::append(...)` + `RedisClient::batch(...)`
+- 拓扑访问：`RedisMasterSlaveClient::execute(...)` / `RedisClusterClient::execute(...)`
 
-- 全异步协程 API，所有操作支持 `.timeout()` 超时控制
-- Pipeline 批处理，百万级 QPS
-- 连接池，自动扩缩容、健康检查
-- 主从读写分离（支持 Sentinel 自动故障转移）
-- Cluster 集群路由（MOVED/ASK 自动重定向）
-- Pub/Sub 发布订阅
-- 统一的 `std::expected` 错误处理
+本文档按如下真相顺序维护：公开头文件与导出目标 → 实现行为 → 示例 → 测试 → benchmark → Markdown 说明。
 
-## 文档导航
+## 特性概览
 
-建议按以下顺序阅读：
+- 异步协程客户端：`RedisClient`、`RedisMasterSlaveClient`、`RedisClusterClient`
+- 统一命令构建：`RedisCommandBuilder` 提供 `command`、`append`、便捷命令封装
+- 批量/流水线：`RedisClient::batch(std::span<const RedisCommandView>)`
+- 连接池：`RedisConnectionPool`
+- 拓扑能力：主从读写、Sentinel 刷新、Cluster 槽路由、MOVED/ASK 自动处理
+- C++23 模块接口：可选目标 `galay-redis-modules`
 
-1. [快速开始](docs/01-快速开始.md) - 编译、基本用法、API 速览、错误处理
-2. [使用示例](docs/02-使用示例.md) - 各类操作示例、连接池、主从、集群、实战场景
-3. [模块介绍](docs/03-模块介绍.md) - 核心模块、连接池、拓扑客户端等模块详解
-4. [运行原理](docs/04-运行原理.md) - 协程状态机、超时机制、RESP 编解码、路由原理
-5. [性能分析](docs/05-性能分析.md) - 基准数据、瓶颈分析、优化建议
-6. [API 文档](docs/06-API文档.md) - 完整的 API 参考文档
-7. [架构设计](docs/07-架构设计.md) - 整体架构、模块职责、设计原理
-8. [高级主题](docs/08-高级主题.md) - 性能优化、连接池、主从、集群、事务、Pub/Sub
-9. [常见问题](docs/09-常见问题.md) - 编译、连接、查询、性能等常见问题解答
+## 文档入口
 
-## 依赖
+- [文档索引](docs/README.md)
+- [00-快速开始](docs/00-快速开始.md)
+- [01-架构设计](docs/01-架构设计.md)
+- [02-API参考](docs/02-API参考.md)
+- [03-使用指南](docs/03-使用指南.md)
+- [04-示例代码](docs/04-示例代码.md)
+- [05-性能测试](docs/05-性能测试.md)
+- [06-高级主题](docs/06-高级主题.md)
+- [07-常见问题](docs/07-常见问题.md)
 
-- C++20 编译器（GCC 11+ / Clang 14+）
-- CMake 3.20+
-- [galay-kernel](https://github.com/gzj-creator/galay-kernel) — 协程运行时
-- [galay-utils](https://github.com/gzj-creator/galay-utils) — 工具库
-- spdlog
-- OpenSSL
+## 构建前提
 
-## 依赖安装（macOS / Homebrew）
+以下要求直接来自 `CMakeLists.txt`、`cmake/option.cmake` 和 `galay-redis/CMakeLists.txt`：
 
-```bash
-brew install cmake spdlog openssl
-```
+- CMake 最低版本：`3.20`
+- C++ 标准：`C++23`
+- 外部依赖：`OpenSSL`、`spdlog`
+- 内部依赖：`galay-kernel`、`galay-utils`
+- 可选构建开关：`BUILD_EXAMPLES`、`BUILD_TESTS`、`BUILD_BENCHMARKS`
 
-## 依赖安装（Ubuntu / Debian）
+如果 `galay-kernel` / `galay-utils` 没有安装到默认搜索路径，需要通过 `CMAKE_PREFIX_PATH` 或各自的 package config 让 `find_package(...)` 可见。
 
-```bash
-sudo apt-get update
-sudo apt-get install -y cmake g++ libspdlog-dev libssl-dev
-```
+`examples/`、`test/`、`benchmark/` 现在不再写死 `/usr/local/include` 或 `/opt/homebrew`。如果依赖安装在自定义前缀，请在配置阶段通过 `CMAKE_PREFIX_PATH`、`OpenSSL_ROOT_DIR` 或对应 package config 暴露它们。
 
-## 编译安装
+下文统一用 `<build-dir>` 表示你的 CMake binary dir；它可以是 `build`、`build-release`、`build-doccheck` 等任意目录名。
 
 ```bash
-git clone https://github.com/gzj-creator/galay-kernel.git
-git clone https://github.com/gzj-creator/galay-utils.git
-git clone https://github.com/gzj-creator/galay-redis.git
-cd galay-redis
-mkdir build && cd build
-cmake ..
-cmake --build . --parallel
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DBUILD_EXAMPLES=ON \
+  -DBUILD_TESTS=ON \
+  -DBUILD_BENCHMARKS=ON
+cmake --build build --parallel
 ```
 
-在你的 CMakeLists.txt 中链接：
+标准 CTest 入口已经注册到 `test/CMakeLists.txt`。常用命令：
+
+```bash
+ctest --test-dir build --output-on-failure -L unit
+ctest --test-dir build --output-on-failure -L redis
+GALAY_IT_ENABLE=1 ctest --test-dir build --output-on-failure -L integration
+```
+
+如果你只想确认 RESP3 value surface 与当前源码一致，可直接运行：
+
+```bash
+ctest --test-dir build --output-on-failure -R T15-resp3_surface
+```
+
+## 在你的项目中接入
+
+当前仓库已经提供可安装的 CMake package config。推荐的企业接入方式是：
 
 ```cmake
-find_package(galay-redis REQUIRED)
-target_link_libraries(your_target PRIVATE galay-redis)
+find_package(galay-redis CONFIG REQUIRED)
+target_link_libraries(your_app PRIVATE galay-redis::galay-redis)
 ```
 
-## 快速开始
+如果 `galay-kernel`、`galay-utils` 或 `spdlog` 安装在自定义前缀，请把对应前缀加入 `CMAKE_PREFIX_PATH`。在源码树内联调时，也仍然可以使用 `add_subdirectory(...)`：
+
+```cmake
+add_subdirectory(external/galay-redis)
+target_link_libraries(your_app PRIVATE galay-redis)
+```
+
+如果工具链满足模块条件，额外可用目标为 `galay-redis-modules`；详细限制见 `docs/06-高级主题.md`。
+
+## 30 秒上手
+
+来源：`examples/include/E1-async_basic_demo.cc`
+
+- 目标：`E1-async_basic_demo`
+- 运行：`./<build-dir>/examples/E1-async_basic_demo 127.0.0.1 6379`
+- 环境变量：无
 
 ```cpp
 #include "galay-redis/async/RedisClient.h"
 #include <galay-kernel/kernel/Runtime.h>
+#include <chrono>
+#include <iostream>
 
-using namespace galay::redis;
 using namespace galay::kernel;
+using namespace galay::redis;
 
-Coroutine example(IOScheduler* scheduler)
+Coroutine demo(IOScheduler* scheduler)
 {
-    RedisClient client(scheduler);
-    if (auto __await_result = co_await client.connect("127.0.0.1", 6379); !__await_result) {
-        // 错误处理：记录日志、重试或提前返回
+    auto client = RedisClientBuilder().scheduler(scheduler).build();
+    RedisCommandBuilder builder;
+
+    auto connect_result = co_await client.connect("127.0.0.1", 6379).timeout(std::chrono::seconds(5));
+    if (!connect_result) {
+        std::cerr << "connect failed: " << connect_result.error().message() << '\n';
+        co_return;
     }
 
-    if (auto __await_result = co_await client.set("key", "value").timeout(std::chrono::seconds(5)); !__await_result) {
-        // 错误处理：记录日志、重试或提前返回
+    auto set_result = co_await client.command(builder.set("demo:key", "hello")).timeout(std::chrono::seconds(5));
+    if (!set_result || !set_result.value()) {
+        std::cerr << "SET failed\n";
+        (void)co_await client.close();
+        co_return;
     }
 
-    auto r = co_await client.get("key");
-    if (r && r.value()) {
-        auto& vals = r.value().value();
-        if (!vals.empty() && vals[0].isString()) {
-            std::cout << vals[0].toString() << std::endl;
+    auto get_result = co_await client.command(builder.get("demo:key")).timeout(std::chrono::seconds(5));
+    if (get_result && get_result.value()) {
+        const auto& values = get_result.value().value();
+        if (!values.empty() && values[0].isString()) {
+            std::cout << values[0].toString() << '\n';
         }
     }
 
-    co_await client.close();
-}
-
-int main()
-{
-    Runtime runtime;
-    runtime.start();
-    auto* scheduler = runtime.getNextIOScheduler();
-    scheduler->spawn(example(scheduler));
-    std::this_thread::sleep_for(std::chrono::seconds(5));
-    runtime.stop();
-    return 0;
+    (void)co_await client.close();
 }
 ```
 
-## 运行测试
+## 示例与测试入口
 
-```bash
-# 功能测试
-./build/test/T5-redis_client_timeout
+| 场景 | 源文件 | 目标 | 运行命令 | 环境 |
+|---|---|---|---|---|
+| 基础异步命令 | `examples/include/E1-async_basic_demo.cc` | `E1-async_basic_demo` | `./<build-dir>/examples/E1-async_basic_demo 127.0.0.1 6379` | 本地 Redis |
+| 批量发送 | `examples/include/E2-pipeline_demo.cc` | `E2-pipeline_demo` | `./<build-dir>/examples/E2-pipeline_demo 127.0.0.1 6379 demo:pipeline: 20` | 本地 Redis |
+| Pub/Sub 与拓扑 API 形状 | `examples/include/E3-topology_pubsub_demo.cc` | `E3-topology_pubsub_demo` | `./<build-dir>/examples/E3-topology_pubsub_demo 127.0.0.1 6379` | 单节点 Redis；非真实 failover |
+| timeout 行为 | `test/T5-redis_client_timeout.cc` | `T5-redis_client_timeout` | `./<build-dir>/test/T5-redis_client_timeout` | 本地 Redis |
+| raw command API | `test/T10-redis_raw_command_api.cc` | `T10-redis_raw_command_api` | `./<build-dir>/test/T10-redis_raw_command_api` | 无 |
+| RESP3 surface 回归 | `test/T15-resp3_surface.cc` | `T15-resp3_surface` | `./<build-dir>/test/T15-resp3_surface` | 无 |
+| topology + pubsub | `test/T11-topology_and_pubsub.cc` | `T11-topology_and_pubsub` | `./<build-dir>/test/T11-topology_and_pubsub` | 本地 Redis |
+| real cluster + sentinel | `test/T13-integration_cluster_sentinel.cc` | `T13-integration_cluster_sentinel` | `test/integration/run_cluster_sentinel_integration.sh --build-dir <build-dir>` | Docker、`redis-cli` |
 
-# 连接池/协议等其他测试
-./build/test/T1-async
-```
+更多映射见 [docs/04-示例代码.md](docs/04-示例代码.md)。
 
-## 运行示例（examples/E*）
+## Benchmark 现状
 
-```bash
-# E1：基础异步 SET/GET/DEL
-./build/examples/E1-async_basic_demo 127.0.0.1 6379
+仓库中的真实 benchmark 目标名是：
 
-# E2：Pipeline 示例
-./build/examples/E2-pipeline_demo 127.0.0.1 6379 demo:pipeline: 20
+- `B1-redis_client_bench`
+- `B2-connection_pool_bench`
 
-# E3：拓扑 + Pub/Sub 示例（单机也可演示）
-./build/examples/E3-topology_pubsub_demo 127.0.0.1 6379
-```
+旧文档中的 `B1-RedisClientBench` / `B2-ConnectionPoolBench` 已废弃。当前 README 不再内嵌历史 QPS 数字；如果你需要复现实验命令、输出字段和注意事项，请直接看 [docs/05-性能测试.md](docs/05-性能测试.md)。
 
-## 运行压测（benchmark/B*）
+## 已知限制
 
-```bash
-# 普通模式
-./build/benchmark/B1-RedisClientBench -h 127.0.0.1 -p 6379 -c 10 -n 100 -m normal
+- 当前 async 主文档流只覆盖 `RedisCommandBuilder` + `command` / `batch` / `execute` 这套接口
+- `sync/RedisSession.h` 仍是公开头文件，但没有对应的 examples/benchmarks 覆盖；已在 API 参考里单独隔离说明
+- `RedisClient` 支持移动，但头文件明确要求不要在 awaitable 进行中移动对象
+- `RedisConnectOptions::version` 在 async 连接路径里目前被用作 IPv4/IPv6 选择提示，`6` 表示 IPv6；它不是本文档里的 RESP3 开关
+- `E3-topology_pubsub_demo` 主要演示 API 形状；真实 MOVED/ASK 与 Sentinel failover 请看 `T13-integration_cluster_sentinel`
+- 模块导入构建存在额外工具链限制，不是所有 Clang/GCC 组合都可用
 
-# Pipeline 性能测试
-./build/benchmark/B1-RedisClientBench -h 127.0.0.1 -p 6379 -c 20 -n 5000 -m pipeline -b 100 -q
+## 仓库内相关索引
 
-# 连接池压测
-./build/benchmark/B2-ConnectionPoolBench -h 127.0.0.1 -p 6379 -c 20 -n 300 -m 4 -x 20 -q
-```
-
-## 性能
-
-| 场景 | QPS | 成功率 |
-|------|-----|--------|
-| 普通模式 10x100 | 26,666 | 100% |
-| 普通模式 50x500 | 112,359 | 100% |
-| Pipeline 20x5000 batch=100 | 1,098,901 | 100% |
-
-## C++23 模块支持更新（2026-02）
-
-本次模块接口已统一为：
-
-- `module;`
-- `#include "galay-redis/module/ModulePrelude.hpp"`
-- `export module galay.redis;`
-- `export { #include ... }`
-
-对应文件：
-
-- `galay-redis/module/galay.redis.cppm`
-- `galay-redis/module/ModulePrelude.hpp`
-
-推荐构建（Clang 20 + Ninja）：
-
-```bash
-cmake -S . -B build-mod -G Ninja \
-  -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm@20/bin/clang++
-cmake --build build-mod --target galay-redis-modules --parallel
-```
-
-## 文档
-
-详细文档见 [docs/](docs/)：
-
-| 文档 | 说明 |
-|------|------|
-| [01-快速开始](docs/01-快速开始.md) | 编译、基本用法、API 速览、错误处理 |
-| [02-使用示例](docs/02-使用示例.md) | 各类操作示例、连接池、主从、集群、实战场景 |
-| [03-模块介绍](docs/03-模块介绍.md) | 核心模块、连接池、拓扑客户端等模块详解 |
-| [04-运行原理](docs/04-运行原理.md) | 协程状态机、超时机制、RESP 编解码、路由原理 |
-| [05-性能分析](docs/05-性能分析.md) | 基准数据、瓶颈分析、优化建议 |
-| [06-API文档](docs/06-API文档.md) | 完整的 API 参考文档 |
-| [07-架构设计](docs/07-架构设计.md) | 整体架构、模块职责、设计原理 |
-| [08-高级主题](docs/08-高级主题.md) | 性能优化、连接池、主从、集群、事务、Pub/Sub |
-| [09-常见问题](docs/09-常见问题.md) | 编译、连接、查询、性能等常见问题解答 |
+- [docs/README.md](docs/README.md)
 
 ## 许可证
 
-与 galay 项目相同的许可证。
+与 `galay` 项目保持一致。
