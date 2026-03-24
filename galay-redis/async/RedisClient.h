@@ -48,6 +48,7 @@ namespace galay::redis
 
     struct RedisBorrowedCommand
     {
+        // Borrowed bytes must remain valid until the awaited exchange completes.
         std::string_view encoded;
         size_t expected_replies = 1;
     };
@@ -580,12 +581,14 @@ namespace galay::redis
         // ======================== 命令执行 ========================
 
         RedisExchangeOperation command(RedisEncodedCommand command_packet);
+        // Temporary forwarding implementation keeps API linkable before fast-path machine wiring.
         RedisExchangeOperation commandBorrowed(RedisBorrowedCommand packet);
         RedisExchangeOperation receive(size_t expected_replies = 1);
 
         // ======================== Pipeline批量操作 ========================
 
         RedisExchangeOperation batch(std::span<const RedisCommandView> commands);
+        // Temporary forwarding implementation keeps API linkable before fast-path machine wiring.
         RedisExchangeOperation batchBorrowed(std::string_view encoded, size_t expected_replies);
 
         // ======================== 连接管理 ========================
@@ -655,6 +658,23 @@ namespace galay::redis
     inline galay::redis::RedisClient galay::redis::RedisClientBuilder::build() const
     {
         return RedisClient(m_scheduler, m_config, m_buffer_provider);
+    }
+
+    inline RedisExchangeOperation RedisClient::commandBorrowed(RedisBorrowedCommand packet)
+    {
+        RedisEncodedCommand owned;
+        owned.encoded.assign(packet.encoded.data(), packet.encoded.size());
+        owned.expected_replies = packet.expected_replies;
+        return command(std::move(owned));
+    }
+
+    inline RedisExchangeOperation RedisClient::batchBorrowed(std::string_view encoded,
+                                                             size_t expected_replies)
+    {
+        RedisEncodedCommand owned;
+        owned.encoded.assign(encoded.data(), encoded.size());
+        owned.expected_replies = expected_replies;
+        return command(std::move(owned));
     }
 
     inline galay::redis::RedissClient galay::redis::RedissClientBuilder::build() const

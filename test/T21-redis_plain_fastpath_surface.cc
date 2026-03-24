@@ -1,6 +1,7 @@
 #include <chrono>
 #include <concepts>
 #include <string_view>
+#include <type_traits>
 
 #include "async/RedisClient.h"
 
@@ -19,6 +20,12 @@ namespace
     };
 
     static_assert(HasBorrowedPlainFastPath<RedisClient>);
+    static_assert(std::is_same_v<
+                  decltype(&RedisClient::commandBorrowed),
+                  RedisExchangeOperation (RedisClient::*)(RedisBorrowedCommand)>);
+    static_assert(std::is_same_v<
+                  decltype(&RedisClient::batchBorrowed),
+                  RedisExchangeOperation (RedisClient::*)(std::string_view, size_t)>);
 }
 
 int main()
