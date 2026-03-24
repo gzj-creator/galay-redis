@@ -386,28 +386,23 @@ namespace galay::redis
         struct RedissExchangeMachine
         {
             using result_type = RedissCommandResult;
-            static constexpr galay::kernel::SequenceOwnerDomain kSequenceOwnerDomain =
-                galay::kernel::SequenceOwnerDomain::ReadWrite;
 
             explicit RedissExchangeMachine(std::shared_ptr<RedissExchangeSharedState> state);
 
-            galay::kernel::MachineAction<result_type> advance();
-            void onRead(std::expected<size_t, IOError> result);
-            void onWrite(std::expected<size_t, IOError> result);
+            galay::ssl::SslMachineAction<result_type> advance();
+            void onHandshake(std::expected<void, galay::ssl::SslError> result);
+            void onRecv(std::expected<galay::kernel::Bytes, galay::ssl::SslError> result);
+            void onSend(std::expected<size_t, galay::ssl::SslError> result);
+            void onShutdown(std::expected<void, galay::ssl::SslError> result);
 
         private:
             bool prepareReadWindow();
             std::expected<bool, RedisError> tryParseReplies();
-            galay::kernel::MachineAction<result_type> advanceSsl();
             void setError(RedisError error) noexcept;
             void setSendError(const galay::ssl::SslError& ssl_error) noexcept;
             void setRecvError(const galay::ssl::SslError& ssl_error) noexcept;
-            void handleSendResult(std::expected<size_t, galay::ssl::SslError> result);
-            void handleRecvResult(std::expected<galay::kernel::Bytes, galay::ssl::SslError> result);
 
             std::shared_ptr<RedissExchangeSharedState> m_state;
-            galay::ssl::SslOperationDriver m_driver;
-            bool m_ssl_active = false;
         };
 
         struct RedissConnectSharedState
@@ -483,7 +478,7 @@ namespace galay::redis
             bool m_ssl_active = false;
         };
         using RedissExchangeOperation =
-            galay::kernel::StateMachineAwaitable<RedissExchangeMachine>;
+            galay::ssl::SslStateMachineAwaitable<RedissExchangeMachine>;
         using RedissConnectOperation =
             galay::kernel::StateMachineAwaitable<RedissConnectMachine>;
     } // namespace detail

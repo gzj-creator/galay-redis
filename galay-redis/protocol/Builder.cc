@@ -163,7 +163,8 @@ namespace galay::redis
     {
         RedisEncodedCommand result;
         result.expected_replies = normalizeExpectedReplies(expected_replies);
-        m_encoder.append(result.encoded, cmd, args);
+        result.encoded.reserve(m_encoder.estimateCommandBytes(cmd, args));
+        m_encoder.appendCommandFast(result.encoded, cmd, args);
         return result;
     }
 
@@ -174,7 +175,8 @@ namespace galay::redis
     {
         RedisEncodedCommand result;
         result.expected_replies = normalizeExpectedReplies(expected_replies);
-        m_encoder.append(result.encoded, cmd, args);
+        result.encoded.reserve(m_encoder.estimateCommandBytes(cmd, args));
+        m_encoder.appendCommandFast(result.encoded, cmd, args);
         return result;
     }
 
@@ -185,7 +187,8 @@ namespace galay::redis
     {
         RedisEncodedCommand result;
         result.expected_replies = normalizeExpectedReplies(expected_replies);
-        m_encoder.append(result.encoded, cmd, args);
+        result.encoded.reserve(m_encoder.estimateCommandBytes(cmd, args));
+        m_encoder.appendCommandFast(result.encoded, cmd, args);
         return result;
     }
 

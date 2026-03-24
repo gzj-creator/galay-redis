@@ -216,6 +216,36 @@ namespace galay::redis::protocol
                            std::string_view cmd,
                            std::initializer_list<std::string_view> args) const;
 
+        [[nodiscard]] size_t estimateCommandBytes(std::string_view cmd,
+                                                  std::span<const std::string_view> args) const
+        {
+            size_t total = 1 + decimalDigits(1 + args.size()) + 2;
+            total += estimateBulkStringBytes(cmd.size());
+            for (const auto& arg : args) {
+                total += estimateBulkStringBytes(arg.size());
+            }
+            return total;
+        }
+
+        [[nodiscard]] size_t estimateCommandBytes(std::string_view cmd,
+                                                  std::initializer_list<std::string_view> args) const
+        {
+            return estimateCommandBytes(
+                cmd,
+                std::span<const std::string_view>(args.begin(), args.size()));
+        }
+
+        [[nodiscard]] size_t estimateCommandBytes(std::string_view cmd,
+                                                  const std::vector<std::string>& args) const
+        {
+            size_t total = 1 + decimalDigits(1 + args.size()) + 2;
+            total += estimateBulkStringBytes(cmd.size());
+            for (const auto& arg : args) {
+                total += estimateBulkStringBytes(arg.size());
+            }
+            return total;
+        }
+
         // Fast-path: append command without reserve (caller must ensure capacity)
         void appendCommandFast(std::string& out, const std::vector<std::string>& cmd_parts) const
         {

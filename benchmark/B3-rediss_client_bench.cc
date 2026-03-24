@@ -41,6 +41,11 @@ struct ClientResult {
     std::vector<std::int64_t> latencies;
 };
 
+struct PrebuiltBenchmarkInputs {
+    std::vector<std::string> keys;
+    std::vector<std::string> values;
+};
+
 std::atomic<int> g_completed_clients{0};
 std::counting_semaphore<std::numeric_limits<int>::max()> g_completed_sem(0);
 std::vector<ClientResult> g_client_results;
@@ -189,6 +194,19 @@ std::int64_t percentile(const std::vector<std::int64_t>& sorted, double p)
     return sorted[std::min(idx, sorted.size() - 1)];
 }
 
+PrebuiltBenchmarkInputs buildInputs(std::string_view prefix, int client_id, int operations)
+{
+    PrebuiltBenchmarkInputs inputs;
+    inputs.keys.reserve(static_cast<size_t>(operations));
+    inputs.values.reserve(static_cast<size_t>(operations));
+    for (int i = 0; i < operations; ++i) {
+        inputs.keys.push_back(
+            std::string(prefix) + ":" + std::to_string(client_id) + ":" + std::to_string(i));
+        inputs.values.push_back("value_" + std::to_string(i));
+    }
+    return inputs;
+}
+
 template <typename T>
 void countSingleResult(const T& result, std::int64_t& success, std::int64_t& error, std::int64_t& timeout)
 {
@@ -284,10 +302,12 @@ Coroutine benchmarkNormal(IOScheduler* scheduler, const BenchmarkOptions* option
         co_return;
     }
 
+    auto inputs = buildInputs("bench:rediss:normal", client_id, options->operations);
+
     const auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < options->operations; ++i) {
-        const std::string key = "bench:rediss:normal:" + std::to_string(client_id) + ":" + std::to_string(i);
-        const std::string value = "value_" + std::to_string(i);
+        const auto& key = inputs.keys[static_cast<size_t>(i)];
+        const auto& value = inputs.values[static_cast<size_t>(i)];
 
         const auto set_begin = std::chrono::high_resolution_clock::now();
         auto set_result = co_await client.command(command_builder.set(key, value)).timeout(request_timeout);
@@ -339,6 +359,8 @@ Coroutine benchmarkPipeline(IOScheduler* scheduler, const BenchmarkOptions* opti
         co_return;
     }
 
+    auto inputs = buildInputs("bench:rediss:pipeline", client_id, options->operations);
+
     const auto start = std::chrono::high_resolution_clock::now();
     int offset = 0;
     RedisCommandBuilder builder;
@@ -353,8 +375,9 @@ Coroutine benchmarkPipeline(IOScheduler* scheduler, const BenchmarkOptions* opti
 
         builder.clear();
         for (int i = 0; i < current_batch; ++i) {
-            const std::string key = "bench:rediss:pipeline:" + std::to_string(client_id) + ":" + std::to_string(offset + i);
-            const std::string value = "value_" + std::to_string(offset + i);
+            const auto index = static_cast<size_t>(offset + i);
+            const auto& key = inputs.keys[index];
+            const auto& value = inputs.values[index];
             builder.append("SET", std::array<std::string_view, 2>{key, value});
         }
 
