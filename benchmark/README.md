@@ -2,8 +2,8 @@
 
 目录结构：
 
-- `B1-RedisClientBench.cc`：RedisClient 普通/Pipeline/Batch 压测
-- `B2-ConnectionPoolBench.cc`：连接池并发压测
+- `B1-redis_client_bench.cc`：RedisClient `normal` / `normal-batch` / `pipeline` 压测
+- `B2-connection_pool_bench.cc`：连接池并发压测
 
 构建：
 
@@ -15,7 +15,7 @@ cmake --build build-release --parallel
 ## B1 参数
 
 ```bash
-./build-release/benchmark/B1-RedisClientBench \
+./build-release/benchmark/B1-redis_client_bench \
   [-h host] [-p port] [-c clients] [-n operations] \
   [-m normal|normal-batch|pipeline] [-b batch_size] \
   [--timeout-ms -1|N] [--buffer-size bytes] [--track-alloc] [-q]
@@ -24,6 +24,14 @@ cmake --build build-release --parallel
 - `--timeout-ms`: `-1` 表示不启用请求超时；`N>=0` 表示所有请求统一使用该超时。
 - `--buffer-size`: 客户端 ring-buffer 大小，跨客户端对比时必须保持一致。
 - `--track-alloc`: 启用分配统计（会引入额外开销，建议只在 allocation 分析时开启）。
+
+当前 `B1` mode 对应的实现路径：
+
+- `normal`：复用预编码 RESP 字节，通过 `RedisClient::commandBorrowed(...)` 发送。
+- `pipeline`：复用 `RedisCommandBuilder::encoded()`，通过 `RedisClient::batchBorrowed(...)` 发送。
+- `normal-batch`：继续走常规 `RedisClient::batch(...)`。
+
+所以 plain `normal` / `pipeline` 的数字，表示当前 borrowed fast path 的吞吐，不等于所有 owning API 的泛化 baseline。
 
 B1 输出包含：
 - `Ops/sec`（吞吐）
@@ -40,7 +48,7 @@ B1 输出包含：
 示例（pipeline，无 timeout）：
 
 ```bash
-./build-release/benchmark/B1-RedisClientBench \
+./build-release/benchmark/B1-redis_client_bench \
   -h 127.0.0.1 -p 6379 -c 10 -n 50000 -m pipeline -b 100 \
   --timeout-ms -1 --buffer-size 32768 -q
 ```
@@ -48,13 +56,30 @@ B1 输出包含：
 示例（normal-batch，开启分配统计）：
 
 ```bash
-./build-release/benchmark/B1-RedisClientBench \
+./build-release/benchmark/B1-redis_client_bench \
   -h 127.0.0.1 -p 6379 -c 10 -n 50000 -m normal-batch -b 100 \
   --timeout-ms -1 --buffer-size 32768 --track-alloc -q
 ```
 
+## Rust 对齐基准
+
+Rust 同机同参对齐工具在 `benchmarks/rust/`：
+
+```bash
+bash benchmarks/rust/run_rust_alignment.sh --help
+```
+
+公平性约束：
+
+- `baseline`：按 `B1/B3` 的模型走，每个 worker 使用独立 client/connection，不借共享连接自动流水线偷优势。
+- `ceiling`：允许使用各 Rust 客户端推荐的共享/自动流水线路径，只作为 native reference，不作为严格 apples-to-apples 结论。
+
+结果记录：
+
+- `docs/plans/2026-03-24-rust-redis-benchmark-alignment-results.md`
+
 B2 示例：
 
 ```bash
-./build-release/benchmark/B2-ConnectionPoolBench -h 127.0.0.1 -p 6379 -c 20 -n 300 -m 4 -x 20 -q
+./build-release/benchmark/B2-connection_pool_bench -h 127.0.0.1 -p 6379 -c 20 -n 300 -m 4 -x 20 -q
 ```

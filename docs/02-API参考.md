@@ -231,6 +231,9 @@
 
 ### 类型别名与配置结构
 
+- `class RedisBorrowedCommand`
+- `using RedisExchangeOperation = detail::RedisExchangeOperation`
+- `using RedisConnectOperation = detail::RedisConnectOperation`
 - `using RedisResult = std::expected<std::vector<RedisValue>, RedisError>`
 - `using RedisVoidResult = std::expected<void, RedisError>`
 - `struct RedisConnectOptions`
@@ -246,6 +249,14 @@
 
 - 当前 async 示例和测试都使用默认 `version = 2`
 - 实现里 `version == 6` 会被解释成 IPv6 socket family，其余值走 IPv4；它不是本文档里的 RESP3 切换开关
+
+### `RedisBorrowedCommand`
+
+- 构造：`RedisBorrowedCommand(const std::string& encoded, size_t expected_replies = 1)`
+- 访问器：`encoded()`、`expectedReplies()`
+- 编译期约束：`std::string&&` 与 `std::string_view` 构造被显式禁用
+- 生命周期约束：`RedisBorrowedCommand` 只借用底层 `std::string`；源字符串必须覆盖整个 `co_await client.commandBorrowed(...)`。`batchBorrowed(const std::string&, ...)` 也遵循同样的借用规则
+- 角色定位：plain TCP 路径的内部 borrowed fast path 包装，不是替代常规 `RedisCommandBuilder` owning API 的通用表面
 
 ### `RedisClientBuilder`
 
@@ -269,9 +280,11 @@
 | `connect(url)` | `std::expected<void, RedisError>` | 支持 `redis://user:password@host:port/db_index` |
 | `connect(ip, port, options)` | `std::expected<void, RedisError>` | async 主连接入口 |
 | `command(RedisEncodedCommand)` | `std::expected<std::optional<std::vector<RedisValue>>, RedisError>` | 单命令发送 |
+| `commandBorrowed(const RedisBorrowedCommand&)` | `std::expected<std::optional<std::vector<RedisValue>>, RedisError>` | plain 内部零拷贝快路径；调用方持有的编码字节必须覆盖整个 `co_await` |
 | `receive(expected_replies = 1)` | `std::expected<std::optional<std::vector<RedisValue>>, RedisError>` | Pub/Sub 或手动收包 |
 | `batch(std::span<const RedisCommandView>)` | `std::expected<std::optional<std::vector<RedisValue>>, RedisError>` | 批量发送 |
-| `close()` | 关闭 awaitable | 关闭连接 |
+| `batchBorrowed(const std::string&, size_t expected_replies)` | `std::expected<std::optional<std::vector<RedisValue>>, RedisError>` | plain 内部预编码 pipeline 快路径；`std::string&&` / `std::string_view` 重载已删除 |
+| `close()` | `galay::kernel::CloseAwaitable` | 关闭连接 |
 | `isClosed()` | `bool` | 查询连接状态 |
 | `setLogger(...)` / `logger()` | logger 管理 | 可选日志注入 |
 
@@ -282,44 +295,43 @@
 - batch：`examples/include/E2-pipeline_demo.cc`、`test/T8-redis_batch_timeout_api.cc`
 - raw command：`test/T10-redis_raw_command_api.cc`
 - Pub/Sub 收包：`examples/include/E3-topology_pubsub_demo.cc`
+- borrowed fast path surface：`test/T21-redis_plain_fastpath_surface.cc`
+- borrowed fast path localhost smoke：`test/T22-redis_plain_fastpath_local.cc`、`test/T23-redis_plain_fastpath_pipeline_local.cc`
 
-### Awaitable 精确语义
+### Operation 类型与精确语义
 
-#### `RedisConnectAwaitable`
+#### `RedisConnectOperation`
 
 - 来源：`RedisClient::connect(url)`、`RedisClient::connect(ip, port, options)`
+- 公开别名：`galay::kernel::StateMachineAwaitable<detail::RedisConnectMachine>`
+- 构建方式：`AwaitableBuilder<RedisVoidResult>::fromStateMachine(...).build()`
 - `await_resume()` 返回 `RedisVoidResult`，即 `std::expected<void, RedisError>`
-- 内部状态机会在 `Connecting`、`Authenticating`、`SelectingDB`、`Done` 之间推进；若对象已失效，则落到 `Invalid`
+- 内部状态机会在 `Connect`、`Send`、`Parse`、`Done` 之间推进；若对象已失效，则落到 `Invalid`
 - `RedisConnectOptions::version` 当前只有 `6` 会被解释成 IPv6，其余值都按 IPv4 处理；它不是 RESP 版本开关
 - `username` 与 `password` 都为空时会跳过 `AUTH`；`db_index == 0` 时会跳过 `SELECT`
 - 当前源码里的错误映射比较具体：连接失败返回 `CONNECTION_ERROR`，`AUTH` 发送/接收失败分别映射到 `SEND_ERROR` / `RECV_ERROR`，鉴权失败映射到 `AUTH_ERROR`，解析失败映射到 `PARSE_ERROR`，连接关闭映射到 `CONNECTION_CLOSED`，无可写 iovec 映射到 `BUFFER_OVERFLOW_ERROR`
 - 需要注意：`SELECT` 阶段收到 Redis 错误回复时，当前实现映射到 `INVALID_ERROR`；这是源码现状，文档按源码为准
 - 若在 `Invalid` 状态下恢复结果，当前实现返回 `INTERNAL_ERROR`
 
-#### `RedisClientAwaitable`
+#### `RedisExchangeOperation`
 
-- 来源：`RedisClient::command(...)`、`RedisClient::receive(...)`
+- 来源：`RedisClient::command(...)`、`RedisClient::commandBorrowed(...)`、`RedisClient::receive(...)`、`RedisClient::batch(...)`、`RedisClient::batchBorrowed(...)`
+- 公开别名：`galay::kernel::StateMachineAwaitable<detail::RedisExchangeMachine>`
+- 构建方式：`AwaitableBuilder<detail::RedisExchangeResult>::fromStateMachine(...).build()`
 - `await_resume()` 返回 `std::expected<std::optional<std::vector<RedisValue>>, RedisError>`
-- 成功返回值里的 `std::vector<RedisValue>` 表示本次命令或收包已完整解析；中间态 `std::nullopt` 表示发送或接收流程尚未完全结束，需要继续推进 awaitable
+- 当前成功完成路径会返回已就绪的 reply `vector<RedisValue>`；当 `expected_replies == 0` 时返回空 `vector`
+- `commandBorrowed(...)` / `batchBorrowed(...)` 与 owning 路径共用同一状态机，只是发送阶段直接借用调用方持有的 RESP 编码字节
+- borrowed 路径不会接管底层字节所有权，因此传入的 `std::string` 必须在整个 `co_await` 完成前保持存活
 - I/O 超时与底层 I/O 错误会先经过 `IOError`，再按 `mapIoErrorToRedisType(...)` 转换成 Redis 侧错误类型
 - 连接关闭、RESP 解析失败、缓冲区窗口不足会分别落到 `CONNECTION_CLOSED`、`PARSE_ERROR`、`BUFFER_OVERFLOW_ERROR`
-- 若对象已经 move-from 或被 `reset()` 标记为失效，恢复结果会得到 `INTERNAL_ERROR`
+- 若状态机落入 `Invalid`，恢复结果会得到 `INTERNAL_ERROR`
 
-#### `RedisPipelineAwaitable`
+#### 公开 / 内部边界
 
-- 来源：`RedisClient::batch(std::span<const RedisCommandView>)`
-- `await_resume()` 同样返回 `std::expected<std::optional<std::vector<RedisValue>>, RedisError>`
-- 与 `RedisClientAwaitable` 的区别主要在于它面向多条命令拼接后的批量发送；成功时返回的 `vector<RedisValue>` 按响应顺序聚合所有 replies
-- 错误语义与单命令 awaitable 保持一致：I/O 错误会映射到 Redis 错误类型，连接关闭 / 解析失败 / 缓冲区溢出也都会转成明确的 `RedisError`
-- 若在 `Invalid` 状态恢复，同样返回 `INTERNAL_ERROR`
-
-#### 内部边界说明
-
-- `RedisClientAwaitable::ProtocolSendAwaitable`、`RedisClientAwaitable::ProtocolRecvAwaitable`
-- `RedisPipelineAwaitable::ProtocolSendAwaitable`、`RedisPipelineAwaitable::ProtocolRecvAwaitable`
-- `RedisClientAwaitable::State`、`RedisPipelineAwaitable::State`
-
-这些名字出现在公共头文件里，主要是为了让 awaitable 内部的发送 / 接收状态机能与调度器协作；它们属于实现细节，不是推荐业务代码直接依赖的稳定 API。
+- 公开头文件里已经不再暴露 `RedisClientAwaitable`、`RedisPipelineAwaitable`、`RedisConnectAwaitable`
+- 旧的 `ProtocolSendAwaitable` / `ProtocolRecvAwaitable` 嵌套类型也不再是公共 surface
+- 当前公开 awaitable 表面统一收敛为 `RedisConnectOperation` / `RedisExchangeOperation`
+- `detail::RedisConnectMachine`、`detail::RedisExchangeMachine` 仍出现在头文件里，是因为 `StateMachineAwaitable` 别名需要这些 machine 类型；它们应按实现细节理解
 
 ## `RedisConnectionPool`
 
@@ -488,6 +500,17 @@
 - `RedissClientBuilder::tlsConfig(...)`
 - `RedissMasterSlaveClientBuilder::tlsConfig(...)`
 - `RedissClusterClientBuilder::tlsConfig(...)`
+
+TLS 单连接路径当前返回的 operation 类型是：
+
+- `detail::RedissConnectOperation`
+- `detail::RedissExchangeOperation`
+
+其中：
+
+- 开启 SSL 构建时，`command(...)` / `batch(...)` 走 `galay::ssl::SslStateMachineAwaitable<detail::RedissExchangeMachine>`
+- 开启 SSL 构建时，`connect(...)` 走 `galay::kernel::StateMachineAwaitable<detail::RedissConnectMachine>`，内部再切到 `SslOperationDriver` 推进握手
+- 未开启 SSL 构建时，这两个类型会立即返回“built without SSL support”的 ready-result awaitable
 
 #### 内部但可见的类型
 

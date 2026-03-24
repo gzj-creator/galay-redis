@@ -2,9 +2,10 @@
 
 `galay-redis` 是 `galay` 生态中的 Redis 客户端库。当前仓库里，经过 `examples/`、`test/`、`benchmark/` 实际覆盖的主路径已经统一到：
 
-- 单命令：`RedisCommandBuilder` + `RedisClient::command(...)`
+- 单命令（常规 owning 路径）：`RedisCommandBuilder` + `RedisClient::command(...)`
+- Plain 零拷贝快路径（内部 / benchmark / 可信调用方）：`RedisBorrowedCommand` + `RedisClient::commandBorrowed(...)` / `RedisClient::batchBorrowed(...)`
 - TLS 单命令：`RedissClientBuilder` + `RedissClient::connect("rediss://...")`
-- 批量发送：`RedisCommandBuilder::append(...)` + `RedisClient::batch(...)`
+- 批量发送（常规 owning 路径）：`RedisCommandBuilder::append(...)` + `RedisClient::batch(...)`
 - 拓扑访问：`RedisMasterSlaveClient::execute(...)` / `RedisClusterClient::execute(...)`
 - TLS 拓扑访问：`RedissMasterSlaveClient::refreshFromSentinel()` / `RedissClusterClient::refreshSlots()`
 
@@ -14,7 +15,7 @@
 
 - 异步协程客户端：`RedisClient`、`RedissClient`、`RedisMasterSlaveClient`、`RedissMasterSlaveClient`、`RedisClusterClient`、`RedissClusterClient`
 - 统一命令构建：`RedisCommandBuilder` 提供 `command`、`append`、便捷命令封装
-- 批量/流水线：`RedisClient::batch(std::span<const RedisCommandView>)`
+- 批量/流水线：`RedisClient::batch(std::span<const RedisCommandView>)`，plain 内部快路径可用 `batchBorrowed(...)`
 - 连接池：`RedisConnectionPool`、`RedissConnectionPool`
 - 拓扑能力：主从读写、Sentinel 刷新、Cluster 槽路由、MOVED/ASK 自动处理
 - TLS / `rediss://`：支持 SNI、CA 校验、`verify_peer`、默认端口 `6380`
@@ -173,6 +174,14 @@ Coroutine demo(IOScheduler* scheduler)
 
 旧文档中的 `B1-RedisClientBench` / `B2-ConnectionPoolBench` 已废弃。当前 README 不再内嵌历史 QPS 数字；如果你需要复现实验命令、输出字段和注意事项，请直接看 [docs/05-性能测试.md](docs/05-性能测试.md)。
 
+`B1` 当前的 plain 模式口径还需要特别注意：
+
+- `normal` 复用预编码 RESP 字节，并通过 `RedisClient::commandBorrowed(...)` 发送
+- `pipeline` 复用 `RedisCommandBuilder::encoded()`，并通过 `RedisClient::batchBorrowed(...)` 发送
+- `normal-batch` 仍走常规 `RedisClient::batch(...)`
+
+因此 plain `normal` / `pipeline` 的数字表示“当前内部 borrowed fast path 的吞吐”，不是泛化到所有 owning API 调用路径的基准值。
+
 ## TLS 快速入口
 
 单节点 TLS：
@@ -200,7 +209,7 @@ auto ping_result = co_await client.command(RedisCommandBuilder().ping()).timeout
 
 ## 已知限制
 
-- 当前 async 主文档流只覆盖 `RedisCommandBuilder` + `command` / `batch` / `execute` 这套接口
+- 面向业务代码的主文档流仍以 `RedisCommandBuilder` + `command` / `batch` / `execute` 为主；`commandBorrowed` / `batchBorrowed` 只在 API 参考与 benchmark 口径里单独说明，按内部 trusted fast path 对待
 - `sync/RedisSession.h` 仍是公开头文件，但没有对应的 examples/benchmarks 覆盖；已在 API 参考里单独隔离说明
 - `RedisClient` 支持移动，但头文件明确要求不要在 awaitable 进行中移动对象
 - `RedisConnectOptions::version` 在 async 连接路径里目前被用作 IPv4/IPv6 选择提示，`6` 表示 IPv6；它不是本文档里的 RESP3 开关
