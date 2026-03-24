@@ -11,7 +11,7 @@ namespace
 {
     template <typename T>
     concept HasBatchTimeoutApi = requires(T& client, std::span<const RedisCommandView> commands) {
-        { client.batch(commands) } -> std::same_as<RedisPipelineAwaitable>;
+        { client.batch(commands) } -> std::same_as<RedisExchangeOperation>;
         { client.batch(commands).timeout(std::chrono::milliseconds(200)) };
     };
 

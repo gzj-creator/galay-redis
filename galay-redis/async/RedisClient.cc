@@ -15,14 +15,6 @@ namespace galay::redis
 {
     namespace detail
     {
-        using galay::kernel::IOContextBase;
-        using ::GHandle;
-        using ::IOEventType;
-
-        using CommandOuterResult = std::expected<RedisClientAwaitable::Result, IOError>;
-        using PipelineOuterResult = std::expected<RedisPipelineAwaitable::Result, IOError>;
-        using ConnectOuterResult = std::expected<RedisVoidResult, IOError>;
-
         RedisError mapIoErrorToRedisError(const IOError& io_error, RedisErrorType fallback)
         {
             if (IOError::contains(io_error.code(), galay::kernel::kTimeout)) {
@@ -179,26 +171,10 @@ namespace galay::redis
 
     } // namespace detail
 
-    RedisClientAwaitable::RedisClientAwaitable(RedisClient& client,
-                                               std::string encoded_command,
-                                               size_t expected_replies,
-                                               bool recv_only)
-        : m_state(std::make_shared<SharedState>(
-              client,
-              std::move(encoded_command),
-              expected_replies,
-              recv_only))
-        , m_inner(galay::kernel::AwaitableBuilder<Result>::fromStateMachine(
-                      client.socket().controller(),
-                      Machine(m_state))
-                      .build())
-    {
-    }
-
-    RedisClientAwaitable::SharedState::SharedState(RedisClient& client,
-                                                   std::string encoded_command_in,
-                                                   size_t expected_replies_in,
-                                                   bool recv_only_in)
+    detail::RedisExchangeSharedState::RedisExchangeSharedState(RedisClient& client,
+                                                               std::string encoded_command_in,
+                                                               size_t expected_replies_in,
+                                                               bool recv_only_in)
         : client(&client)
         , encoded_cmd(std::move(encoded_command_in))
         , expected_replies(expected_replies_in)
@@ -210,36 +186,67 @@ namespace galay::redis
         values.reserve(expected_replies);
         if (expected_replies == 0) {
             result = std::optional<std::vector<RedisValue>>(std::vector<RedisValue>{});
-            phase = Phase::Done;
+            phase = RedisExchangeSharedState::Phase::Done;
         }
     }
 
-    RedisClientAwaitable::Machine::Machine(std::shared_ptr<SharedState> state)
+    detail::RedisExchangeSharedState::RedisExchangeSharedState(
+        RedisClient& client,
+        std::span<const RedisCommandView> commands)
+        : client(&client)
+        , expected_replies(commands.size())
+    {
+        values.reserve(expected_replies);
+        if (expected_replies == 0) {
+            result = std::optional<std::vector<RedisValue>>(std::vector<RedisValue>{});
+            phase = RedisExchangeSharedState::Phase::Done;
+            return;
+        }
+
+        static thread_local protocol::RespEncoder encoder;
+        size_t encoded_bytes = 0;
+        for (const auto& cmd_view : commands) {
+            encoded_bytes += !cmd_view.encoded.empty()
+                                 ? cmd_view.encoded.size()
+                                 : detail::estimateRespCommandBytes(cmd_view.command, cmd_view.args);
+        }
+
+        encoded_cmd.reserve(encoded_bytes);
+        for (const auto& cmd_view : commands) {
+            if (!cmd_view.encoded.empty()) {
+                encoded_cmd.append(cmd_view.encoded.data(), cmd_view.encoded.size());
+            } else {
+                encoder.appendCommandFast(encoded_cmd, cmd_view.command, cmd_view.args);
+            }
+        }
+    }
+
+    detail::RedisExchangeMachine::RedisExchangeMachine(std::shared_ptr<RedisExchangeSharedState> state)
         : m_state(std::move(state))
     {
     }
 
-    void RedisClientAwaitable::Machine::setError(RedisError error) noexcept
+    void detail::RedisExchangeMachine::setError(RedisError error) noexcept
     {
         m_state->result = std::unexpected(std::move(error));
-        m_state->phase = Phase::Invalid;
+        m_state->phase = RedisExchangeSharedState::Phase::Invalid;
     }
 
-    void RedisClientAwaitable::Machine::setSendError(const IOError& io_error) noexcept
+    void detail::RedisExchangeMachine::setSendError(const IOError& io_error) noexcept
     {
         setError(detail::mapIoErrorToRedisError(
             io_error,
             RedisErrorType::REDIS_ERROR_TYPE_SEND_ERROR));
     }
 
-    void RedisClientAwaitable::Machine::setRecvError(const IOError& io_error) noexcept
+    void detail::RedisExchangeMachine::setRecvError(const IOError& io_error) noexcept
     {
         setError(detail::mapIoErrorToRedisError(
             io_error,
             RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR));
     }
 
-    bool RedisClientAwaitable::Machine::prepareReadWindow()
+    bool detail::RedisExchangeMachine::prepareReadWindow()
     {
         m_state->read_iov_count = m_state->client->bufferProvider().getWriteIovecs(
             m_state->read_iovecs.data(),
@@ -253,7 +260,7 @@ namespace galay::redis
         return true;
     }
 
-    std::expected<bool, RedisError> RedisClientAwaitable::Machine::tryParseReplies()
+    std::expected<bool, RedisError> detail::RedisExchangeMachine::tryParseReplies()
     {
         bool parse_error = false;
         const bool done = detail::parseRepliesFromRingBuffer(
@@ -271,38 +278,38 @@ namespace galay::redis
         return done;
     }
 
-    galay::kernel::MachineAction<RedisClientAwaitable::Result>
-    RedisClientAwaitable::Machine::advance()
+    galay::kernel::MachineAction<detail::RedisExchangeMachine::result_type>
+    detail::RedisExchangeMachine::advance()
     {
         if (m_state->result.has_value()) {
             return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
         }
 
         switch (m_state->phase) {
-        case Phase::Invalid:
+        case RedisExchangeSharedState::Phase::Invalid:
             setError(RedisError(
                 RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-                "RedisClientAwaitable in Invalid state"));
+                "Redis exchange machine in invalid state"));
             return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
-        case Phase::Start:
+        case RedisExchangeSharedState::Phase::Start:
             if (m_state->expected_replies == 0) {
                 m_state->result = std::optional<std::vector<RedisValue>>(std::vector<RedisValue>{});
-                m_state->phase = Phase::Done;
+                m_state->phase = RedisExchangeSharedState::Phase::Done;
                 return galay::kernel::MachineAction<result_type>::continue_();
             }
             m_state->phase = (m_state->recv_only || m_state->encoded_cmd.empty())
-                ? Phase::Parse
-                : Phase::Send;
+                ? RedisExchangeSharedState::Phase::Parse
+                : RedisExchangeSharedState::Phase::Send;
             return galay::kernel::MachineAction<result_type>::continue_();
-        case Phase::Send:
+        case RedisExchangeSharedState::Phase::Send:
             if (m_state->sent >= m_state->encoded_cmd.size()) {
-                m_state->phase = Phase::Parse;
+                m_state->phase = RedisExchangeSharedState::Phase::Parse;
                 return galay::kernel::MachineAction<result_type>::continue_();
             }
             return galay::kernel::MachineAction<result_type>::waitWrite(
                 m_state->encoded_cmd.data() + m_state->sent,
                 m_state->encoded_cmd.size() - m_state->sent);
-        case Phase::Parse: {
+        case RedisExchangeSharedState::Phase::Parse: {
             auto parsed = tryParseReplies();
             if (!parsed.has_value()) {
                 setError(std::move(parsed.error()));
@@ -311,7 +318,7 @@ namespace galay::redis
             if (parsed.value()) {
                 auto values = std::move(m_state->values);
                 m_state->result = std::optional<std::vector<RedisValue>>(std::move(values));
-                m_state->phase = Phase::Done;
+                m_state->phase = RedisExchangeSharedState::Phase::Done;
                 return galay::kernel::MachineAction<result_type>::continue_();
             }
             if (!prepareReadWindow()) {
@@ -321,17 +328,17 @@ namespace galay::redis
                 m_state->read_iovecs.data(),
                 m_state->read_iov_count);
         }
-        case Phase::Done:
+        case RedisExchangeSharedState::Phase::Done:
             return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
         }
 
         setError(RedisError(
             RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-            "Unknown RedisClientAwaitable state"));
+            "Unknown redis exchange machine state"));
         return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
     }
 
-    void RedisClientAwaitable::Machine::onRead(std::expected<size_t, IOError> result)
+    void detail::RedisExchangeMachine::onRead(std::expected<size_t, IOError> result)
     {
         if (m_state->result.has_value()) {
             return;
@@ -348,10 +355,10 @@ namespace galay::redis
         }
 
         m_state->client->bufferProvider().produce(result.value());
-        m_state->phase = Phase::Parse;
+        m_state->phase = RedisExchangeSharedState::Phase::Parse;
     }
 
-    void RedisClientAwaitable::Machine::onWrite(std::expected<size_t, IOError> result)
+    void detail::RedisExchangeMachine::onWrite(std::expected<size_t, IOError> result)
     {
         if (m_state->result.has_value()) {
             return;
@@ -369,274 +376,17 @@ namespace galay::redis
 
         m_state->sent += result.value();
         if (m_state->sent >= m_state->encoded_cmd.size()) {
-            m_state->phase = Phase::Parse;
+            m_state->phase = RedisExchangeSharedState::Phase::Parse;
         }
     }
 
-    bool RedisClientAwaitable::isInvalid() const noexcept
-    {
-        return m_state != nullptr && m_state->phase == Phase::Invalid;
-    }
-
-    void RedisClientAwaitable::reset() noexcept
-    {
-        if (!m_state) {
-            return;
-        }
-        m_state->sent = 0;
-        m_state->values.clear();
-        m_state->parse_buffer.clear();
-        m_state->result = std::unexpected(RedisError(
-            RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-            "RedisClientAwaitable reset"));
-        m_state->phase = Phase::Invalid;
-    }
-
-    RedisPipelineAwaitable::RedisPipelineAwaitable(RedisClient& client,
-                                                   std::span<const RedisCommandView> commands)
-        : m_state(std::make_shared<SharedState>(client, commands))
-        , m_inner(galay::kernel::AwaitableBuilder<Result>::fromStateMachine(
-                      client.socket().controller(),
-                      Machine(m_state))
-                      .build())
-    {
-    }
-
-    RedisPipelineAwaitable::SharedState::SharedState(RedisClient& client,
-                                                     std::span<const RedisCommandView> commands)
-        : client(&client)
-        , expected_replies(commands.size())
-    {
-        values.reserve(expected_replies);
-        if (expected_replies == 0) {
-            result = std::optional<std::vector<RedisValue>>(std::vector<RedisValue>{});
-            phase = Phase::Done;
-            return;
-        }
-
-        static thread_local protocol::RespEncoder encoder;
-        size_t encoded_bytes = 0;
-        for (const auto& cmd_view : commands) {
-            encoded_bytes += !cmd_view.encoded.empty()
-                                 ? cmd_view.encoded.size()
-                                 : detail::estimateRespCommandBytes(cmd_view.command, cmd_view.args);
-        }
-
-        encoded_buffer.reserve(encoded_bytes);
-        for (const auto& cmd_view : commands) {
-            if (!cmd_view.encoded.empty()) {
-                encoded_buffer.append(cmd_view.encoded.data(), cmd_view.encoded.size());
-            } else {
-                encoder.appendCommandFast(encoded_buffer, cmd_view.command, cmd_view.args);
-            }
-        }
-    }
-
-    RedisPipelineAwaitable::Machine::Machine(std::shared_ptr<SharedState> state)
-        : m_state(std::move(state))
-    {
-    }
-
-    void RedisPipelineAwaitable::Machine::setError(RedisError error) noexcept
-    {
-        m_state->result = std::unexpected(std::move(error));
-        m_state->phase = Phase::Invalid;
-    }
-
-    void RedisPipelineAwaitable::Machine::setSendError(const IOError& io_error) noexcept
-    {
-        setError(detail::mapIoErrorToRedisError(
-            io_error,
-            RedisErrorType::REDIS_ERROR_TYPE_SEND_ERROR));
-    }
-
-    void RedisPipelineAwaitable::Machine::setRecvError(const IOError& io_error) noexcept
-    {
-        setError(detail::mapIoErrorToRedisError(
-            io_error,
-            RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR));
-    }
-
-    bool RedisPipelineAwaitable::Machine::prepareReadWindow()
-    {
-        m_state->read_iov_count = m_state->client->bufferProvider().getWriteIovecs(
-            m_state->read_iovecs.data(),
-            m_state->read_iovecs.size());
-        if (m_state->read_iov_count == 0) {
-            setError(RedisError(
-                RedisErrorType::REDIS_ERROR_TYPE_BUFFER_OVERFLOW_ERROR,
-                "Ring buffer exhausted before parsing complete pipeline responses"));
-            return false;
-        }
-        return true;
-    }
-
-    std::expected<bool, RedisError> RedisPipelineAwaitable::Machine::tryParseReplies()
-    {
-        bool parse_error = false;
-        const bool done = detail::parseRepliesFromRingBuffer(
-            m_state->client->bufferProvider(),
-            m_state->client->parser(),
-            m_state->parse_buffer,
-            m_state->expected_replies,
-            m_state->values,
-            parse_error);
-        if (parse_error) {
-            return std::unexpected(RedisError(
-                RedisErrorType::REDIS_ERROR_TYPE_PARSE_ERROR,
-                "Parse error"));
-        }
-        return done;
-    }
-
-    galay::kernel::MachineAction<RedisPipelineAwaitable::Result>
-    RedisPipelineAwaitable::Machine::advance()
-    {
-        if (m_state->result.has_value()) {
-            return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
-        }
-
-        switch (m_state->phase) {
-        case Phase::Invalid:
-            setError(RedisError(
-                RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-                "RedisPipelineAwaitable in Invalid state"));
-            return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
-        case Phase::Start:
-            if (m_state->expected_replies == 0) {
-                m_state->result = std::optional<std::vector<RedisValue>>(std::vector<RedisValue>{});
-                m_state->phase = Phase::Done;
-                return galay::kernel::MachineAction<result_type>::continue_();
-            }
-            m_state->phase = m_state->encoded_buffer.empty() ? Phase::Parse : Phase::Send;
-            return galay::kernel::MachineAction<result_type>::continue_();
-        case Phase::Send:
-            if (m_state->sent >= m_state->encoded_buffer.size()) {
-                m_state->phase = Phase::Parse;
-                return galay::kernel::MachineAction<result_type>::continue_();
-            }
-            return galay::kernel::MachineAction<result_type>::waitWrite(
-                m_state->encoded_buffer.data() + m_state->sent,
-                m_state->encoded_buffer.size() - m_state->sent);
-        case Phase::Parse: {
-            auto parsed = tryParseReplies();
-            if (!parsed.has_value()) {
-                setError(std::move(parsed.error()));
-                return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
-            }
-            if (parsed.value()) {
-                auto values = std::move(m_state->values);
-                m_state->result = std::optional<std::vector<RedisValue>>(std::move(values));
-                m_state->phase = Phase::Done;
-                return galay::kernel::MachineAction<result_type>::continue_();
-            }
-            if (!prepareReadWindow()) {
-                return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
-            }
-            return galay::kernel::MachineAction<result_type>::waitReadv(
-                m_state->read_iovecs.data(),
-                m_state->read_iov_count);
-        }
-        case Phase::Done:
-            return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
-        }
-
-        setError(RedisError(
-            RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-            "Unknown RedisPipelineAwaitable state"));
-        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
-    }
-
-    void RedisPipelineAwaitable::Machine::onRead(std::expected<size_t, IOError> result)
-    {
-        if (m_state->result.has_value()) {
-            return;
-        }
-        if (!result.has_value()) {
-            setRecvError(result.error());
-            return;
-        }
-        if (result.value() == 0) {
-            setError(RedisError(
-                RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_CLOSED,
-                "Connection closed"));
-            return;
-        }
-
-        m_state->client->bufferProvider().produce(result.value());
-        m_state->phase = Phase::Parse;
-    }
-
-    void RedisPipelineAwaitable::Machine::onWrite(std::expected<size_t, IOError> result)
-    {
-        if (m_state->result.has_value()) {
-            return;
-        }
-        if (!result.has_value()) {
-            setSendError(result.error());
-            return;
-        }
-        if (result.value() == 0) {
-            setError(RedisError(
-                RedisErrorType::REDIS_ERROR_TYPE_SEND_ERROR,
-                "Send returned 0"));
-            return;
-        }
-
-        m_state->sent += result.value();
-        if (m_state->sent >= m_state->encoded_buffer.size()) {
-            m_state->phase = Phase::Parse;
-        }
-    }
-
-    bool RedisPipelineAwaitable::isInvalid() const noexcept
-    {
-        return m_state != nullptr && m_state->phase == Phase::Invalid;
-    }
-
-    void RedisPipelineAwaitable::reset() noexcept
-    {
-        if (!m_state) {
-            return;
-        }
-        m_state->sent = 0;
-        m_state->values.clear();
-        m_state->parse_buffer.clear();
-        m_state->result = std::unexpected(RedisError(
-            RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-            "RedisPipelineAwaitable reset"));
-        m_state->phase = Phase::Invalid;
-    }
-
-    RedisConnectAwaitable::RedisConnectAwaitable(RedisClient& client,
-                                                 std::string ip,
-                                                 int32_t port,
-                                                 std::string username,
-                                                 std::string password,
-                                                 int32_t db_index,
-                                                 int version)
-        : m_state(std::make_shared<SharedState>(
-              client,
-              std::move(ip),
-              port,
-              std::move(username),
-              std::move(password),
-              db_index,
-              version))
-        , m_inner(galay::kernel::AwaitableBuilder<RedisVoidResult>::fromStateMachine(
-                      client.socket().controller(),
-                      Machine(m_state))
-                      .build())
-    {
-    }
-
-    RedisConnectAwaitable::SharedState::SharedState(RedisClient& client,
-                                                    std::string ip_in,
-                                                    int32_t port_in,
-                                                    std::string username_in,
-                                                    std::string password_in,
-                                                    int32_t db_index_in,
-                                                    int version_in)
+    detail::RedisConnectSharedState::RedisConnectSharedState(RedisClient& client,
+                                                             std::string ip_in,
+                                                             int32_t port_in,
+                                                             std::string username_in,
+                                                             std::string password_in,
+                                                             int32_t db_index_in,
+                                                             int version_in)
         : client(&client)
         , ip(std::move(ip_in))
         , port(port_in)
@@ -650,39 +400,39 @@ namespace galay::redis
         client.parser() = protocol::RespParser();
     }
 
-    RedisConnectAwaitable::Machine::Machine(std::shared_ptr<SharedState> state)
+    detail::RedisConnectMachine::RedisConnectMachine(std::shared_ptr<RedisConnectSharedState> state)
         : m_state(std::move(state))
     {
     }
 
-    void RedisConnectAwaitable::Machine::setError(RedisError error) noexcept
+    void detail::RedisConnectMachine::setError(RedisError error) noexcept
     {
         m_state->result = std::unexpected(std::move(error));
-        m_state->phase = Phase::Invalid;
+        m_state->phase = RedisConnectSharedState::Phase::Invalid;
     }
 
-    void RedisConnectAwaitable::Machine::setConnectError(const IOError& io_error) noexcept
+    void detail::RedisConnectMachine::setConnectError(const IOError& io_error) noexcept
     {
         setError(detail::mapIoErrorToRedisError(
             io_error,
             RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR));
     }
 
-    void RedisConnectAwaitable::Machine::setSendError(const IOError& io_error) noexcept
+    void detail::RedisConnectMachine::setSendError(const IOError& io_error) noexcept
     {
         setError(detail::mapIoErrorToRedisError(
             io_error,
             RedisErrorType::REDIS_ERROR_TYPE_SEND_ERROR));
     }
 
-    void RedisConnectAwaitable::Machine::setRecvError(const IOError& io_error) noexcept
+    void detail::RedisConnectMachine::setRecvError(const IOError& io_error) noexcept
     {
         setError(detail::mapIoErrorToRedisError(
             io_error,
             RedisErrorType::REDIS_ERROR_TYPE_RECV_ERROR));
     }
 
-    bool RedisConnectAwaitable::Machine::prepareReadWindow()
+    bool detail::RedisConnectMachine::prepareReadWindow()
     {
         m_state->read_iov_count = m_state->client->bufferProvider().getWriteIovecs(
             m_state->read_iovecs.data(),
@@ -696,11 +446,11 @@ namespace galay::redis
         return true;
     }
 
-    bool RedisConnectAwaitable::Machine::prepareNextCommand()
+    bool detail::RedisConnectMachine::prepareNextCommand()
     {
         RedisCommandBuilder builder;
         if (!m_state->auth_sent && (!m_state->username.empty() || !m_state->password.empty())) {
-            m_state->pending_command = PendingCommand::Auth;
+            m_state->pending_command = RedisConnectSharedState::PendingCommand::Auth;
             m_state->auth_sent = true;
             m_state->encoded_cmd = m_state->username.empty()
                 ? builder.auth(m_state->password).encoded
@@ -710,19 +460,19 @@ namespace galay::redis
         }
 
         if (!m_state->select_sent && m_state->db_index != 0) {
-            m_state->pending_command = PendingCommand::Select;
+            m_state->pending_command = RedisConnectSharedState::PendingCommand::Select;
             m_state->select_sent = true;
             m_state->encoded_cmd = builder.select(m_state->db_index).encoded;
             m_state->sent = 0;
             return true;
         }
 
-        m_state->pending_command = PendingCommand::None;
+        m_state->pending_command = RedisConnectSharedState::PendingCommand::None;
         m_state->encoded_cmd.clear();
         return false;
     }
 
-    std::expected<bool, RedisError> RedisConnectAwaitable::Machine::tryParseReply()
+    std::expected<bool, RedisError> detail::RedisConnectMachine::tryParseReply()
     {
         bool parse_error = false;
         const bool done = detail::parseRepliesFromRingBuffer(
@@ -750,45 +500,45 @@ namespace galay::redis
         RedisValue reply = std::move(m_state->values.front());
         m_state->values.clear();
         if (reply.isError()) {
-            const auto error_type = m_state->pending_command == PendingCommand::Auth
+            const auto error_type = m_state->pending_command == RedisConnectSharedState::PendingCommand::Auth
                 ? RedisErrorType::REDIS_ERROR_TYPE_AUTH_ERROR
                 : RedisErrorType::REDIS_ERROR_TYPE_INVALID_ERROR;
             return std::unexpected(RedisError(error_type, reply.toError()));
         }
 
         if (prepareNextCommand()) {
-            m_state->phase = Phase::Send;
+            m_state->phase = RedisConnectSharedState::Phase::Send;
         } else {
-            m_state->phase = Phase::Done;
+            m_state->phase = RedisConnectSharedState::Phase::Done;
             m_state->result = RedisVoidResult{};
         }
         return true;
     }
 
     galay::kernel::MachineAction<RedisVoidResult>
-    RedisConnectAwaitable::Machine::advance()
+    detail::RedisConnectMachine::advance()
     {
         if (m_state->result.has_value()) {
             return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
         }
 
         switch (m_state->phase) {
-        case Phase::Invalid:
+        case RedisConnectSharedState::Phase::Invalid:
             setError(RedisError(
                 RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-                "RedisConnectAwaitable in Invalid state"));
+                "Redis connect machine in invalid state"));
             return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
-        case Phase::Connect:
+        case RedisConnectSharedState::Phase::Connect:
             return galay::kernel::MachineAction<result_type>::waitConnect(m_state->host);
-        case Phase::Send:
+        case RedisConnectSharedState::Phase::Send:
             if (m_state->sent >= m_state->encoded_cmd.size()) {
-                m_state->phase = Phase::Parse;
+                m_state->phase = RedisConnectSharedState::Phase::Parse;
                 return galay::kernel::MachineAction<result_type>::continue_();
             }
             return galay::kernel::MachineAction<result_type>::waitWrite(
                 m_state->encoded_cmd.data() + m_state->sent,
                 m_state->encoded_cmd.size() - m_state->sent);
-        case Phase::Parse: {
+        case RedisConnectSharedState::Phase::Parse: {
             auto parsed = tryParseReply();
             if (!parsed.has_value()) {
                 setError(std::move(parsed.error()));
@@ -804,7 +554,7 @@ namespace galay::redis
                 m_state->read_iovecs.data(),
                 m_state->read_iov_count);
         }
-        case Phase::Done:
+        case RedisConnectSharedState::Phase::Done:
             if (!m_state->result.has_value()) {
                 m_state->result = RedisVoidResult{};
             }
@@ -813,11 +563,11 @@ namespace galay::redis
 
         setError(RedisError(
             RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-            "Unknown RedisConnectAwaitable state"));
+            "Unknown redis connect machine state"));
         return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
     }
 
-    void RedisConnectAwaitable::Machine::onConnect(std::expected<void, IOError> result)
+    void detail::RedisConnectMachine::onConnect(std::expected<void, IOError> result)
     {
         if (m_state->result.has_value()) {
             return;
@@ -829,14 +579,14 @@ namespace galay::redis
 
         m_state->client->setClosed(false);
         if (prepareNextCommand()) {
-            m_state->phase = Phase::Send;
+            m_state->phase = RedisConnectSharedState::Phase::Send;
         } else {
-            m_state->phase = Phase::Done;
+            m_state->phase = RedisConnectSharedState::Phase::Done;
             m_state->result = RedisVoidResult{};
         }
     }
 
-    void RedisConnectAwaitable::Machine::onRead(std::expected<size_t, IOError> result)
+    void detail::RedisConnectMachine::onRead(std::expected<size_t, IOError> result)
     {
         if (m_state->result.has_value()) {
             return;
@@ -853,10 +603,10 @@ namespace galay::redis
         }
 
         m_state->client->bufferProvider().produce(result.value());
-        m_state->phase = Phase::Parse;
+        m_state->phase = RedisConnectSharedState::Phase::Parse;
     }
 
-    void RedisConnectAwaitable::Machine::onWrite(std::expected<size_t, IOError> result)
+    void detail::RedisConnectMachine::onWrite(std::expected<size_t, IOError> result)
     {
         if (m_state->result.has_value()) {
             return;
@@ -874,27 +624,8 @@ namespace galay::redis
 
         m_state->sent += result.value();
         if (m_state->sent >= m_state->encoded_cmd.size()) {
-            m_state->phase = Phase::Parse;
+            m_state->phase = RedisConnectSharedState::Phase::Parse;
         }
-    }
-
-    bool RedisConnectAwaitable::isInvalid() const
-    {
-        return m_state != nullptr && m_state->phase == Phase::Invalid;
-    }
-
-    void RedisConnectAwaitable::reset() noexcept
-    {
-        if (!m_state) {
-            return;
-        }
-        m_state->sent = 0;
-        m_state->parse_buffer.clear();
-        m_state->values.clear();
-        m_state->result = std::unexpected(RedisError(
-            RedisErrorType::REDIS_ERROR_TYPE_INTERNAL_ERROR,
-            "RedisConnectAwaitable reset"));
-        m_state->phase = Phase::Invalid;
     }
 
     RedisClient::RedisClient(IOScheduler* scheduler,
@@ -937,26 +668,42 @@ namespace galay::redis
         return *this;
     }
 
-    RedisClientAwaitable RedisClient::command(RedisEncodedCommand command_packet)
+    RedisExchangeOperation RedisClient::command(RedisEncodedCommand command_packet)
     {
-        return RedisClientAwaitable(
+        auto state = std::make_shared<detail::RedisExchangeSharedState>(
             *this,
             std::move(command_packet.encoded),
             command_packet.expected_replies,
             false);
+        return galay::kernel::AwaitableBuilder<detail::RedisExchangeResult>::fromStateMachine(
+                   m_socket.controller(),
+                   detail::RedisExchangeMachine(std::move(state)))
+            .build();
     }
 
-    RedisClientAwaitable RedisClient::receive(size_t expected_replies)
+    RedisExchangeOperation RedisClient::receive(size_t expected_replies)
     {
-        return RedisClientAwaitable(*this, std::string(), expected_replies, true);
+        auto state = std::make_shared<detail::RedisExchangeSharedState>(
+            *this,
+            std::string(),
+            expected_replies,
+            true);
+        return galay::kernel::AwaitableBuilder<detail::RedisExchangeResult>::fromStateMachine(
+                   m_socket.controller(),
+                   detail::RedisExchangeMachine(std::move(state)))
+            .build();
     }
 
-    RedisPipelineAwaitable RedisClient::batch(std::span<const RedisCommandView> commands)
+    RedisExchangeOperation RedisClient::batch(std::span<const RedisCommandView> commands)
     {
-        return RedisPipelineAwaitable(*this, commands);
+        auto state = std::make_shared<detail::RedisExchangeSharedState>(*this, commands);
+        return galay::kernel::AwaitableBuilder<detail::RedisExchangeResult>::fromStateMachine(
+                   m_socket.controller(),
+                   detail::RedisExchangeMachine(std::move(state)))
+            .build();
     }
 
-    RedisConnectAwaitable RedisClient::connect(const std::string& url)
+    RedisConnectOperation RedisClient::connect(const std::string& url)
     {
         std::regex pattern(R"(^redis://(?:([^:@]*)(?::([^@]*))?@)?([a-zA-Z0-9\-\.]+)(?::(\d+))?(?:/(\d+))?$)");
         std::smatch matches;
@@ -1028,11 +775,11 @@ namespace galay::redis
         return connect(ip, port, std::move(options));
     }
 
-    RedisConnectAwaitable RedisClient::connect(const std::string& ip,
+    RedisConnectOperation RedisClient::connect(const std::string& ip,
                                                int32_t port,
                                                RedisConnectOptions options)
     {
-        return RedisConnectAwaitable(
+        auto state = std::make_shared<detail::RedisConnectSharedState>(
             *this,
             ip,
             port,
@@ -1040,5 +787,9 @@ namespace galay::redis
             std::move(options.password),
             options.db_index,
             options.version);
+        return galay::kernel::AwaitableBuilder<RedisVoidResult>::fromStateMachine(
+                   m_socket.controller(),
+                   detail::RedisConnectMachine(std::move(state)))
+            .build();
     }
 } // namespace galay::redis

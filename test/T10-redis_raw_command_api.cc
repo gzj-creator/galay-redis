@@ -11,7 +11,7 @@ namespace
 {
     template <typename T>
     concept HasRawCommandApi = requires(T& client, RedisEncodedCommand command) {
-        { client.command(std::move(command)) } -> std::same_as<RedisClientAwaitable>;
+        { client.command(std::move(command)) } -> std::same_as<RedisExchangeOperation>;
         { client.command(std::move(command)).timeout(std::chrono::milliseconds(200)) };
     };
 

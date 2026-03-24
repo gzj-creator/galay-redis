@@ -79,16 +79,16 @@ namespace galay::redis
         explicit RedisMasterSlaveClient(IOScheduler* scheduler,
                                         AsyncRedisConfig config = AsyncRedisConfig::noTimeout());
 
-        RedisConnectAwaitable connectMaster(const RedisNodeAddress& master);
-        RedisConnectAwaitable addReplica(const RedisNodeAddress& replica);
+        RedisConnectOperation connectMaster(const RedisNodeAddress& master);
+        RedisConnectOperation addReplica(const RedisNodeAddress& replica);
 
         Task<RedisCommandResult> execute(const std::string& cmd,
                                          const std::vector<std::string>& args,
                                          bool prefer_read = false,
                                          bool auto_retry = true);
-        RedisPipelineAwaitable batch(std::span<const RedisCommandView> commands,
+        RedisExchangeOperation batch(std::span<const RedisCommandView> commands,
                                      bool prefer_read = false);
-        RedisConnectAwaitable addSentinel(const RedisNodeAddress& sentinel);
+        RedisConnectOperation addSentinel(const RedisNodeAddress& sentinel);
         void setSentinelMasterName(std::string master_name);
         void setAutoRetryAttempts(size_t attempts) noexcept;
         Task<RedisCommandResult> refreshFromSentinel();
@@ -191,7 +191,7 @@ namespace galay::redis
         explicit RedisClusterClient(IOScheduler* scheduler,
                                     AsyncRedisConfig config = AsyncRedisConfig::noTimeout());
 
-        RedisConnectAwaitable addNode(const RedisClusterNodeAddress& node);
+        RedisConnectOperation addNode(const RedisClusterNodeAddress& node);
         void setSlotRange(size_t node_index, uint16_t slot_start, uint16_t slot_end);
         void setAutoRefreshInterval(std::chrono::milliseconds interval);
 
@@ -199,7 +199,7 @@ namespace galay::redis
                                          const std::vector<std::string>& args,
                                          std::string routing_key = std::string(),
                                          bool auto_retry = true);
-        RedisPipelineAwaitable batch(std::span<const RedisCommandView> commands,
+        RedisExchangeOperation batch(std::span<const RedisCommandView> commands,
                                      std::string routing_key = std::string());
         Task<RedisCommandResult> refreshSlots();
 

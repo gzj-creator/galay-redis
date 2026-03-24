@@ -10,7 +10,7 @@ namespace
 {
     template <typename T>
     concept HasSpanBatchApi = requires(T& client, std::span<const RedisCommandView> commands) {
-        { client.batch(commands) } -> std::same_as<RedisPipelineAwaitable>;
+        { client.batch(commands) } -> std::same_as<RedisExchangeOperation>;
     };
 
     template <typename T>

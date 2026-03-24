@@ -28,22 +28,23 @@ concept HasCore = requires { typename T::Core; };
 
 static_assert(std::same_as<Coroutine, galay::kernel::Task<void>>);
 
-static_assert(!HasProtocolSendAwaitable<RedisClientAwaitable>);
-static_assert(!HasProtocolRecvAwaitable<RedisClientAwaitable>);
-static_assert(!HasCore<RedisClientAwaitable>);
-static_assert(!HasProtocolSendAwaitable<RedisPipelineAwaitable>);
-static_assert(!HasProtocolRecvAwaitable<RedisPipelineAwaitable>);
-static_assert(!HasCore<RedisPipelineAwaitable>);
-static_assert(!HasCore<RedisConnectAwaitable>);
+static_assert(!HasProtocolSendAwaitable<RedisExchangeOperation>);
+static_assert(!HasProtocolRecvAwaitable<RedisExchangeOperation>);
+static_assert(!HasCore<RedisExchangeOperation>);
+static_assert(!HasCore<RedisConnectOperation>);
 
 static_assert(requires(RedisClient& client,
                        RedisEncodedCommand encoded,
                        std::span<const RedisCommandView> commands,
                        RedisConnectionPool& pool,
                        RedisConnectOptions options) {
+    { client.command(std::move(encoded)) } -> std::same_as<RedisExchangeOperation>;
     { client.command(std::move(encoded)).timeout(std::chrono::milliseconds(1)) };
+    { client.receive(1) } -> std::same_as<RedisExchangeOperation>;
     { client.receive(1).timeout(std::chrono::milliseconds(1)) };
+    { client.batch(commands) } -> std::same_as<RedisExchangeOperation>;
     { client.batch(commands).timeout(std::chrono::milliseconds(1)) };
+    { client.connect(std::string("127.0.0.1"), 6379, std::move(options)) } -> std::same_as<RedisConnectOperation>;
     { client.connect(std::string("127.0.0.1"), 6379, std::move(options)).timeout(std::chrono::milliseconds(1)) };
     { pool.initialize().timeout(std::chrono::milliseconds(1)) };
     { pool.acquire().timeout(std::chrono::milliseconds(1)) };

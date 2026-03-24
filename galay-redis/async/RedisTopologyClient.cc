@@ -87,7 +87,7 @@ namespace galay::redis
             return encodeCommand(cmd, std::vector<std::string>(args), expected_replies);
         }
 
-        RedisConnectAwaitable connectToAddress(RedisClient* client, const RedisNodeAddress& address)
+        RedisConnectOperation connectToAddress(RedisClient* client, const RedisNodeAddress& address)
         {
             RedisConnectOptions options;
             options.username = address.username;
@@ -155,7 +155,7 @@ namespace galay::redis
         return m_master.get();
     }
 
-    RedisConnectAwaitable RedisMasterSlaveClient::connectMaster(const RedisNodeAddress& master)
+    RedisConnectOperation RedisMasterSlaveClient::connectMaster(const RedisNodeAddress& master)
     {
         m_master_address = master;
         m_master_connected = false;
@@ -163,7 +163,7 @@ namespace galay::redis
         return connectToAddress(master_client, master);
     }
 
-    RedisConnectAwaitable RedisMasterSlaveClient::addReplica(const RedisNodeAddress& replica)
+    RedisConnectOperation RedisMasterSlaveClient::addReplica(const RedisNodeAddress& replica)
     {
         auto client = std::make_unique<RedisClient>(m_scheduler, m_config);
         auto* raw_client = client.get();
@@ -173,7 +173,7 @@ namespace galay::redis
         return connectToAddress(raw_client, replica);
     }
 
-    RedisConnectAwaitable RedisMasterSlaveClient::addSentinel(const RedisNodeAddress& sentinel)
+    RedisConnectOperation RedisMasterSlaveClient::addSentinel(const RedisNodeAddress& sentinel)
     {
         NodeHandle node;
         node.address = sentinel;
@@ -211,7 +211,7 @@ namespace galay::redis
         co_return co_await executeAutoCoroutine(prefer_read, cmd, args, max_attempts);
     }
 
-    RedisPipelineAwaitable RedisMasterSlaveClient::batch(
+    RedisExchangeOperation RedisMasterSlaveClient::batch(
         std::span<const RedisCommandView> commands,
         bool prefer_read)
     {
@@ -526,7 +526,7 @@ namespace galay::redis
         m_slot_owner.fill(-1);
     }
 
-    RedisConnectAwaitable RedisClusterClient::addNode(const RedisClusterNodeAddress& node)
+    RedisConnectOperation RedisClusterClient::addNode(const RedisClusterNodeAddress& node)
     {
         ClusterNode cluster_node;
         cluster_node.address = node;
@@ -592,7 +592,7 @@ namespace galay::redis
                                                 max_attempts);
     }
 
-    RedisPipelineAwaitable RedisClusterClient::batch(
+    RedisExchangeOperation RedisClusterClient::batch(
         std::span<const RedisCommandView> commands,
         std::string routing_key)
     {
