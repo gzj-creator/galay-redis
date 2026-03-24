@@ -146,15 +146,13 @@ Coroutine runTopologyAndPubSubTests(IOScheduler* scheduler)
             const std::string key = "galay:test:ms:key";
             const std::string value = "ms-value";
 
-            auto write_result = co_await ms_client.execute("SET", {key, value}, false, false)
-                                     .timeout(std::chrono::seconds(5));
+            auto write_result = co_await ms_client.execute("SET", {key, value}, false, false);
             if (!write_result || write_result.value().empty()) {
                 fail("Master write failed");
                 break;
             }
 
-            auto read_result = co_await ms_client.execute("GET", {key}, true, false)
-                                    .timeout(std::chrono::seconds(5));
+            auto read_result = co_await ms_client.execute("GET", {key}, true, false);
             std::string read_value;
             if (!expectSingleStringResult(read_result, &read_value)) {
                 break;
@@ -183,15 +181,13 @@ Coroutine runTopologyAndPubSubTests(IOScheduler* scheduler)
                 break;
             }
 
-            auto write_auto = co_await ms_auto.execute("SET", {"galay:test:auto:ms", "ok"})
-                                       .timeout(std::chrono::seconds(5));
+            auto write_auto = co_await ms_auto.execute("SET", {"galay:test:auto:ms", "ok"});
             if (!write_auto) {
                 fail("execute(write) failed: " + write_auto.error().message());
                 break;
             }
 
-            auto read_auto = co_await ms_auto.execute("GET", {"galay:test:auto:ms"}, true)
-                                      .timeout(std::chrono::seconds(5));
+            auto read_auto = co_await ms_auto.execute("GET", {"galay:test:auto:ms"}, true);
             std::string read_auto_value;
             if (!expectSingleStringResult(read_auto, &read_auto_value)) {
                 break;
@@ -251,8 +247,7 @@ Coroutine runTopologyAndPubSubTests(IOScheduler* scheduler)
             auto cluster_set = co_await cluster_client.execute("SET",
                                                                {cluster_key, cluster_value},
                                                                cluster_key,
-                                                               false)
-                                       .timeout(std::chrono::seconds(5));
+                                                               false);
             if (!cluster_set || cluster_set.value().empty()) {
                 fail("Cluster SET failed");
                 break;
@@ -261,8 +256,7 @@ Coroutine runTopologyAndPubSubTests(IOScheduler* scheduler)
             auto cluster_get = co_await cluster_client.execute("GET",
                                                                {cluster_key},
                                                                cluster_key,
-                                                               false)
-                                       .timeout(std::chrono::seconds(5));
+                                                               false);
             std::string get_value;
             if (!expectSingleStringResult(cluster_get, &get_value)) {
                 break;
@@ -333,7 +327,7 @@ int main()
         g_done = false;
     }
 
-    scheduler->spawn(runTopologyAndPubSubTests(scheduler));
+    scheduleTask(scheduler, runTopologyAndPubSubTests(scheduler));
 
     bool finished = false;
     {

@@ -2,6 +2,7 @@
 #define GALAY_REDIS_CONNECTION_POOL_H
 
 #include "RedisClient.h"
+#include <galay-kernel/kernel/Awaitable.h>
 #include <galay-kernel/kernel/IOScheduler.hpp>
 #include <memory>
 #include <queue>
@@ -80,6 +81,60 @@ namespace galay::redis
         }
     };
 
+    struct RedissConnectionPoolConfig
+    {
+        std::string host = "127.0.0.1";
+        int32_t port = 6380;
+        std::string username = "";
+        std::string password = "";
+        int32_t db_index = 0;
+
+        size_t min_connections = 2;
+        size_t max_connections = 10;
+        size_t initial_connections = 2;
+
+        std::chrono::milliseconds acquire_timeout = std::chrono::seconds(5);
+        std::chrono::milliseconds idle_timeout = std::chrono::minutes(5);
+        std::chrono::milliseconds connect_timeout = std::chrono::seconds(3);
+
+        bool enable_health_check = true;
+        std::chrono::milliseconds health_check_interval = std::chrono::seconds(30);
+
+        bool enable_auto_reconnect = true;
+        int max_reconnect_attempts = 3;
+
+        bool enable_connection_validation = true;
+        bool validate_on_acquire = false;
+        bool validate_on_return = false;
+
+        RedissClientConfig tls_config;
+
+        bool validate() const
+        {
+            return min_connections <= max_connections &&
+                   initial_connections >= min_connections &&
+                   initial_connections <= max_connections &&
+                   max_connections > 0;
+        }
+
+        static RedissConnectionPoolConfig defaultConfig()
+        {
+            return RedissConnectionPoolConfig{};
+        }
+
+        static RedissConnectionPoolConfig create(const std::string& host, int32_t port,
+                                                 size_t min_conn = 2, size_t max_conn = 10)
+        {
+            RedissConnectionPoolConfig config;
+            config.host = host;
+            config.port = port;
+            config.min_connections = min_conn;
+            config.max_connections = max_conn;
+            config.initial_connections = min_conn;
+            return config;
+        }
+    };
+
     /**
      * @brief 连接包装器，用于管理连接的生命周期
      */
@@ -130,8 +185,51 @@ namespace galay::redis
         bool m_is_healthy;
     };
 
+    class PooledRedissConnection
+    {
+    public:
+        PooledRedissConnection(std::shared_ptr<RedissClient> client, IOScheduler* scheduler)
+            : m_client(std::move(client))
+            , m_scheduler(scheduler)
+            , m_last_used(std::chrono::steady_clock::now())
+            , m_is_healthy(true)
+        {
+        }
+
+        RedissClient* get() { return m_client.get(); }
+        const RedissClient* get() const { return m_client.get(); }
+
+        RedissClient* operator->() { return m_client.get(); }
+        const RedissClient* operator->() const { return m_client.get(); }
+
+        RedissClient& operator*() { return *m_client; }
+        const RedissClient& operator*() const { return *m_client; }
+
+        void updateLastUsed()
+        {
+            m_last_used = std::chrono::steady_clock::now();
+        }
+
+        std::chrono::milliseconds getIdleTime() const
+        {
+            auto now = std::chrono::steady_clock::now();
+            return std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_used);
+        }
+
+        bool isHealthy() const { return m_is_healthy; }
+        void setHealthy(bool healthy) { m_is_healthy = healthy; }
+        bool isClosed() const { return m_client->isClosed(); }
+
+    private:
+        std::shared_ptr<RedissClient> m_client;
+        IOScheduler* m_scheduler;
+        std::chrono::steady_clock::time_point m_last_used;
+        bool m_is_healthy;
+    };
+
     // 前向声明
     class RedisConnectionPool;
+    class RedissConnectionPool;
 
     /**
      * @brief 连接池初始化等待体
@@ -139,19 +237,38 @@ namespace galay::redis
     class PoolInitializeAwaitable : public galay::kernel::TimeoutSupport<PoolInitializeAwaitable>
     {
     public:
-        PoolInitializeAwaitable(RedisConnectionPool& pool);
+        using Result = RedisVoidResult;
 
-        bool await_ready() const noexcept { return false; }
-        bool await_suspend(std::coroutine_handle<> handle);
-        RedisVoidResult await_resume();
+        PoolInitializeAwaitable(RedisConnectionPool& pool);
+        PoolInitializeAwaitable(const PoolInitializeAwaitable&) = delete;
+        PoolInitializeAwaitable& operator=(const PoolInitializeAwaitable&) = delete;
+        PoolInitializeAwaitable(PoolInitializeAwaitable&&) noexcept = default;
+        PoolInitializeAwaitable& operator=(PoolInitializeAwaitable&&) noexcept = default;
+
+        bool await_ready() { return m_inner.await_ready(); }
+        template <typename Promise>
+        bool await_suspend(std::coroutine_handle<Promise> handle)
+        {
+            return m_inner.await_suspend(handle);
+        }
+        Result await_resume() { return m_inner.await_resume(); }
+        void markTimeout() { m_inner.markTimeout(); }
 
     private:
-        RedisConnectionPool* m_pool;
-        size_t m_created_count = 0;
+        struct Flow
+        {
+            explicit Flow(RedisConnectionPool& pool);
 
-    public:
-        // TimeoutSupport 需要访问此成员来设置超时错误
-        std::expected<RedisVoidResult, galay::kernel::IOError> m_result;
+            void run(galay::kernel::SequenceOps<Result, 4>& ops);
+
+            RedisConnectionPool* m_pool = nullptr;
+        };
+
+        using InnerAwaitable =
+            galay::kernel::StateMachineAwaitable<typename galay::kernel::AwaitableBuilder<Result, 4, Flow>::MachineT>;
+
+        std::unique_ptr<Flow> m_flow;
+        InnerAwaitable m_inner;
     };
 
     /**
@@ -160,20 +277,114 @@ namespace galay::redis
     class PoolAcquireAwaitable : public galay::kernel::TimeoutSupport<PoolAcquireAwaitable>
     {
     public:
-        PoolAcquireAwaitable(RedisConnectionPool& pool);
+        using Result = std::expected<std::shared_ptr<PooledConnection>, RedisError>;
 
-        bool await_ready() const noexcept { return false; }
-        bool await_suspend(std::coroutine_handle<> handle);
-        std::expected<std::shared_ptr<PooledConnection>, RedisError> await_resume();
+        PoolAcquireAwaitable(RedisConnectionPool& pool);
+        PoolAcquireAwaitable(const PoolAcquireAwaitable&) = delete;
+        PoolAcquireAwaitable& operator=(const PoolAcquireAwaitable&) = delete;
+        PoolAcquireAwaitable(PoolAcquireAwaitable&&) noexcept = default;
+        PoolAcquireAwaitable& operator=(PoolAcquireAwaitable&&) noexcept = default;
+
+        bool await_ready() { return m_inner.await_ready(); }
+        template <typename Promise>
+        bool await_suspend(std::coroutine_handle<Promise> handle)
+        {
+            return m_inner.await_suspend(handle);
+        }
+        Result await_resume() { return m_inner.await_resume(); }
+        void markTimeout() { m_inner.markTimeout(); }
 
     private:
-        RedisConnectionPool* m_pool;
-        std::shared_ptr<PooledConnection> m_conn;
-        std::chrono::steady_clock::time_point m_start_time;
+        struct Flow
+        {
+            explicit Flow(RedisConnectionPool& pool);
 
+            void run(galay::kernel::SequenceOps<Result, 4>& ops);
+
+            RedisConnectionPool* m_pool = nullptr;
+            std::chrono::steady_clock::time_point m_start_time;
+        };
+
+        using InnerAwaitable =
+            galay::kernel::StateMachineAwaitable<typename galay::kernel::AwaitableBuilder<Result, 4, Flow>::MachineT>;
+
+        std::unique_ptr<Flow> m_flow;
+        InnerAwaitable m_inner;
+    };
+
+    class RedissPoolInitializeAwaitable : public galay::kernel::TimeoutSupport<RedissPoolInitializeAwaitable>
+    {
     public:
-        // TimeoutSupport 需要访问此成员来设置超时错误
-        std::expected<std::expected<std::shared_ptr<PooledConnection>, RedisError>, galay::kernel::IOError> m_result;
+        using Result = RedisVoidResult;
+
+        explicit RedissPoolInitializeAwaitable(RedissConnectionPool& pool);
+        RedissPoolInitializeAwaitable(const RedissPoolInitializeAwaitable&) = delete;
+        RedissPoolInitializeAwaitable& operator=(const RedissPoolInitializeAwaitable&) = delete;
+        RedissPoolInitializeAwaitable(RedissPoolInitializeAwaitable&&) noexcept = default;
+        RedissPoolInitializeAwaitable& operator=(RedissPoolInitializeAwaitable&&) noexcept = default;
+
+        bool await_ready() { return m_inner.await_ready(); }
+        template <typename Promise>
+        bool await_suspend(std::coroutine_handle<Promise> handle)
+        {
+            return m_inner.await_suspend(handle);
+        }
+        Result await_resume() { return m_inner.await_resume(); }
+        void markTimeout() { m_inner.markTimeout(); }
+
+    private:
+        struct Flow
+        {
+            explicit Flow(RedissConnectionPool& pool);
+
+            void run(galay::kernel::SequenceOps<Result, 4>& ops);
+
+            RedissConnectionPool* m_pool = nullptr;
+        };
+
+        using InnerAwaitable =
+            galay::kernel::StateMachineAwaitable<typename galay::kernel::AwaitableBuilder<Result, 4, Flow>::MachineT>;
+
+        std::unique_ptr<Flow> m_flow;
+        InnerAwaitable m_inner;
+    };
+
+    class RedissPoolAcquireAwaitable : public galay::kernel::TimeoutSupport<RedissPoolAcquireAwaitable>
+    {
+    public:
+        using Result = std::expected<std::shared_ptr<PooledRedissConnection>, RedisError>;
+
+        explicit RedissPoolAcquireAwaitable(RedissConnectionPool& pool);
+        RedissPoolAcquireAwaitable(const RedissPoolAcquireAwaitable&) = delete;
+        RedissPoolAcquireAwaitable& operator=(const RedissPoolAcquireAwaitable&) = delete;
+        RedissPoolAcquireAwaitable(RedissPoolAcquireAwaitable&&) noexcept = default;
+        RedissPoolAcquireAwaitable& operator=(RedissPoolAcquireAwaitable&&) noexcept = default;
+
+        bool await_ready() { return m_inner.await_ready(); }
+        template <typename Promise>
+        bool await_suspend(std::coroutine_handle<Promise> handle)
+        {
+            return m_inner.await_suspend(handle);
+        }
+        Result await_resume() { return m_inner.await_resume(); }
+        void markTimeout() { m_inner.markTimeout(); }
+
+    private:
+        struct Flow
+        {
+            explicit Flow(RedissConnectionPool& pool);
+
+            void run(galay::kernel::SequenceOps<Result, 4>& ops);
+
+            RedissConnectionPool* m_pool = nullptr;
+            std::chrono::steady_clock::time_point m_start_time;
+        };
+
+        using InnerAwaitable =
+            galay::kernel::StateMachineAwaitable<typename galay::kernel::AwaitableBuilder<Result, 4, Flow>::MachineT>;
+
+        std::unique_ptr<Flow> m_flow;
+        InnerAwaitable m_inner;
     };
 
     /**
@@ -296,6 +507,11 @@ namespace galay::redis
         friend class PoolInitializeAwaitable;
         friend class PoolAcquireAwaitable;
 
+        RedisVoidResult initializeSync();
+        std::expected<std::shared_ptr<PooledConnection>, RedisError>
+        acquireSync(std::chrono::steady_clock::time_point start_time);
+        void recordAcquireStats(std::chrono::steady_clock::time_point start_time);
+
         /**
          * @brief 获取或创建连接（内部方法，同步）
          */
@@ -338,6 +554,80 @@ namespace galay::redis
 
         // 日志
         RedisLoggerPtr m_logger;
+
+        // 本地 builder awaitable 的占位控制器；纯 local step 会同步完成，不会真正注册 IO。
+        galay::kernel::IOController m_builder_controller{GHandle::invalid()};
+    };
+
+    class RedissConnectionPool
+    {
+    public:
+        using PoolStats = RedisConnectionPool::PoolStats;
+
+        RedissConnectionPool(IOScheduler* scheduler,
+                             RedissConnectionPoolConfig config = RedissConnectionPoolConfig::defaultConfig());
+
+        RedissConnectionPool(const RedissConnectionPool&) = delete;
+        RedissConnectionPool& operator=(const RedissConnectionPool&) = delete;
+        RedissConnectionPool(RedissConnectionPool&&) = delete;
+        RedissConnectionPool& operator=(RedissConnectionPool&&) = delete;
+
+        RedissPoolInitializeAwaitable initialize();
+        RedissPoolAcquireAwaitable acquire();
+        void release(std::shared_ptr<PooledRedissConnection> conn);
+        void triggerHealthCheck();
+        void triggerIdleCleanup();
+        void warmup();
+        size_t cleanupUnhealthyConnections();
+        size_t expandPool(size_t count);
+        size_t shrinkPool(size_t target_size);
+        void shutdown();
+        PoolStats getStats() const;
+        const RedissConnectionPoolConfig& getConfig() const { return m_config; }
+
+        RedisLoggerPtr& logger() { return m_logger; }
+        void setLogger(RedisLoggerPtr logger) { m_logger = std::move(logger); }
+
+        ~RedissConnectionPool();
+
+    private:
+        friend class RedissPoolInitializeAwaitable;
+        friend class RedissPoolAcquireAwaitable;
+
+        RedisVoidResult initializeSync();
+        std::expected<std::shared_ptr<PooledRedissConnection>, RedisError>
+        acquireSync(std::chrono::steady_clock::time_point start_time);
+        void recordAcquireStats(std::chrono::steady_clock::time_point start_time);
+        std::expected<std::shared_ptr<PooledRedissConnection>, RedisError> getConnectionSync();
+        bool checkConnectionHealthSync(std::shared_ptr<PooledRedissConnection> conn);
+
+    private:
+        IOScheduler* m_scheduler;
+        RedissConnectionPoolConfig m_config;
+        std::queue<std::shared_ptr<PooledRedissConnection>> m_available_connections;
+        std::vector<std::shared_ptr<PooledRedissConnection>> m_all_connections;
+        mutable std::mutex m_mutex;
+        std::condition_variable m_cv;
+
+        std::atomic<bool> m_is_initialized{false};
+        std::atomic<bool> m_is_shutting_down{false};
+
+        std::atomic<uint64_t> m_total_acquired{0};
+        std::atomic<uint64_t> m_total_released{0};
+        std::atomic<uint64_t> m_total_created{0};
+        std::atomic<uint64_t> m_total_destroyed{0};
+        std::atomic<uint64_t> m_health_check_failures{0};
+        std::atomic<size_t> m_waiting_requests{0};
+        std::atomic<uint64_t> m_reconnect_attempts{0};
+        std::atomic<uint64_t> m_reconnect_successes{0};
+        std::atomic<uint64_t> m_validation_failures{0};
+
+        std::atomic<uint64_t> m_total_acquire_time_ms{0};
+        std::atomic<double> m_max_acquire_time_ms{0.0};
+        std::atomic<size_t> m_peak_active_connections{0};
+
+        RedisLoggerPtr m_logger;
+        galay::kernel::IOController m_builder_controller{GHandle::invalid()};
     };
 
     /**
@@ -403,6 +693,65 @@ namespace galay::redis
     private:
         RedisConnectionPool* m_pool;
         std::shared_ptr<PooledConnection> m_conn;
+    };
+
+    class ScopedRedissConnection
+    {
+    public:
+        ScopedRedissConnection(RedissConnectionPool& pool, std::shared_ptr<PooledRedissConnection> conn)
+            : m_pool(&pool)
+            , m_conn(std::move(conn))
+        {
+        }
+
+        ScopedRedissConnection(const ScopedRedissConnection&) = delete;
+        ScopedRedissConnection& operator=(const ScopedRedissConnection&) = delete;
+
+        ScopedRedissConnection(ScopedRedissConnection&& other) noexcept
+            : m_pool(other.m_pool)
+            , m_conn(std::move(other.m_conn))
+        {
+            other.m_pool = nullptr;
+        }
+
+        ScopedRedissConnection& operator=(ScopedRedissConnection&& other) noexcept
+        {
+            if (this != &other) {
+                release();
+                m_pool = other.m_pool;
+                m_conn = std::move(other.m_conn);
+                other.m_pool = nullptr;
+            }
+            return *this;
+        }
+
+        RedissClient* get() { return m_conn ? m_conn->get() : nullptr; }
+        const RedissClient* get() const { return m_conn ? m_conn->get() : nullptr; }
+
+        RedissClient* operator->() { return get(); }
+        const RedissClient* operator->() const { return get(); }
+
+        RedissClient& operator*() { return *get(); }
+        const RedissClient& operator*() const { return *get(); }
+
+        explicit operator bool() const { return m_conn != nullptr; }
+
+        void release()
+        {
+            if (m_pool && m_conn) {
+                m_pool->release(std::move(m_conn));
+                m_conn = nullptr;
+            }
+        }
+
+        ~ScopedRedissConnection()
+        {
+            release();
+        }
+
+    private:
+        RedissConnectionPool* m_pool;
+        std::shared_ptr<PooledRedissConnection> m_conn;
     };
 
 } // namespace galay::redis

@@ -175,12 +175,12 @@ int main()
 
         // 测试1: 基本超时功能
         std::cout << "\n### Running basic timeout tests ###\n" << std::endl;
-        scheduler->spawn(testRedisClientWithTimeout(scheduler));
+        scheduleTask(scheduler, testRedisClientWithTimeout(scheduler));
 
         // 测试2: 并发客户端
         std::cout << "\n### Running concurrent client tests ###\n" << std::endl;
         for (int i = 0; i < 3; ++i) {
-            scheduler->spawn(testConcurrentCommands(scheduler, i));
+            scheduleTask(scheduler, testConcurrentCommands(scheduler, i));
         }
 
         // 等待一段时间让测试完成

@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(galay-redis)
 
+set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON)
+
 message(STATUS "CXX_STANDARD: ${CMAKE_CXX_STANDARD}")
 
 # 构建选项 / 平台选项

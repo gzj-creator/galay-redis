@@ -223,9 +223,11 @@ int main(int argc, char* argv[])
                 return 1;
             }
             if (use_pipeline) {
-                scheduler->spawn(benchmarkPipeline(scheduler, i, batch_size, pipeline_batches, verbose));
+                scheduleTask(scheduler,
+                             benchmarkPipeline(scheduler, i, batch_size, pipeline_batches, verbose));
             } else {
-                scheduler->spawn(benchmarkClient(scheduler, i, operations_per_client, verbose));
+                scheduleTask(scheduler,
+                             benchmarkClient(scheduler, i, operations_per_client, verbose));
             }
         }
 

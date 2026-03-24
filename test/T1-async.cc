@@ -75,7 +75,7 @@ int main()
             return 1;
         }
 
-        scheduler->spawn(testAsyncRedisClient(scheduler));
+        scheduleTask(scheduler, testAsyncRedisClient(scheduler));
 
         std::this_thread::sleep_for(std::chrono::seconds(3));
         runtime.stop();

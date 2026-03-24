@@ -3,18 +3,21 @@
 `galay-redis` 是 `galay` 生态中的 Redis 客户端库。当前仓库里，经过 `examples/`、`test/`、`benchmark/` 实际覆盖的主路径已经统一到：
 
 - 单命令：`RedisCommandBuilder` + `RedisClient::command(...)`
+- TLS 单命令：`RedissClientBuilder` + `RedissClient::connect("rediss://...")`
 - 批量发送：`RedisCommandBuilder::append(...)` + `RedisClient::batch(...)`
 - 拓扑访问：`RedisMasterSlaveClient::execute(...)` / `RedisClusterClient::execute(...)`
+- TLS 拓扑访问：`RedissMasterSlaveClient::refreshFromSentinel()` / `RedissClusterClient::refreshSlots()`
 
 本文档按如下真相顺序维护：公开头文件与导出目标 → 实现行为 → 示例 → 测试 → benchmark → Markdown 说明。
 
 ## 特性概览
 
-- 异步协程客户端：`RedisClient`、`RedisMasterSlaveClient`、`RedisClusterClient`
+- 异步协程客户端：`RedisClient`、`RedissClient`、`RedisMasterSlaveClient`、`RedissMasterSlaveClient`、`RedisClusterClient`、`RedissClusterClient`
 - 统一命令构建：`RedisCommandBuilder` 提供 `command`、`append`、便捷命令封装
 - 批量/流水线：`RedisClient::batch(std::span<const RedisCommandView>)`
-- 连接池：`RedisConnectionPool`
+- 连接池：`RedisConnectionPool`、`RedissConnectionPool`
 - 拓扑能力：主从读写、Sentinel 刷新、Cluster 槽路由、MOVED/ASK 自动处理
+- TLS / `rediss://`：支持 SNI、CA 校验、`verify_peer`、默认端口 `6380`
 - C++23 模块接口：可选目标 `galay-redis-modules`
 
 ## 文档入口
@@ -37,7 +40,8 @@
 - C++ 标准：`C++23`
 - 外部依赖：`OpenSSL`、`spdlog`
 - 内部依赖：`galay-kernel`、`galay-utils`
-- 可选构建开关：`BUILD_EXAMPLES`、`BUILD_TESTS`、`BUILD_BENCHMARKS`
+- TLS 额外依赖：`galay-ssl`（当 `GALAY_REDIS_ENABLE_SSL=ON` 时）
+- 可选构建开关：`BUILD_EXAMPLES`、`BUILD_TESTS`、`BUILD_BENCHMARKS`、`GALAY_REDIS_ENABLE_SSL`
 
 如果 `galay-kernel` / `galay-utils` 没有安装到默认搜索路径，需要通过 `CMAKE_PREFIX_PATH` 或各自的 package config 让 `find_package(...)` 可见。
 
@@ -54,6 +58,16 @@ cmake -S . -B build \
 cmake --build build --parallel
 ```
 
+启用 TLS / `rediss://` 时额外打开：
+
+```bash
+cmake -S . -B build-ssl \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DGALAY_REDIS_ENABLE_SSL=ON \
+  -DBUILD_TESTS=ON
+cmake --build build-ssl --parallel
+```
+
 标准 CTest 入口已经注册到 `test/CMakeLists.txt`。常用命令：
 
 ```bash
@@ -62,10 +76,10 @@ ctest --test-dir build --output-on-failure -L redis
 GALAY_IT_ENABLE=1 ctest --test-dir build --output-on-failure -L integration
 ```
 
-如果你只想确认 RESP3 value surface 与当前源码一致，可直接运行：
+如果你只想确认当前 awaitable / 连接池公开 surface 与源码一致，可直接运行：
 
 ```bash
-ctest --test-dir build --output-on-failure -R T15-resp3_surface
+ctest --test-dir build --output-on-failure -R T15-awaitable_surface
 ```
 
 ## 在你的项目中接入
@@ -140,9 +154,11 @@ Coroutine demo(IOScheduler* scheduler)
 | 基础异步命令 | `examples/include/E1-async_basic_demo.cc` | `E1-async_basic_demo` | `./<build-dir>/examples/E1-async_basic_demo 127.0.0.1 6379` | 本地 Redis |
 | 批量发送 | `examples/include/E2-pipeline_demo.cc` | `E2-pipeline_demo` | `./<build-dir>/examples/E2-pipeline_demo 127.0.0.1 6379 demo:pipeline: 20` | 本地 Redis |
 | Pub/Sub 与拓扑 API 形状 | `examples/include/E3-topology_pubsub_demo.cc` | `E3-topology_pubsub_demo` | `./<build-dir>/examples/E3-topology_pubsub_demo 127.0.0.1 6379` | 单节点 Redis；非真实 failover |
+| `rediss://` TLS smoke | `test/T17-rediss_client_tls.cc` | `T17-rediss_client_tls` | `GALAY_REDIS_TLS_URL=rediss://... ./<build-dir>/test/T17-rediss_client_tls` | TLS Redis，可选 `GALAY_REDIS_TLS_CA` / `GALAY_REDIS_TLS_VERIFY_PEER` / `GALAY_REDIS_TLS_SERVER_NAME` |
+| TLS pool + topology smoke | `test/T19-rediss_pool_and_topology.cc` | `T19-rediss_pool_and_topology` | `GALAY_REDIS_TLS_URL=rediss://... ./<build-dir>/test/T19-rediss_pool_and_topology` | TLS Redis，可选 Sentinel / Cluster 环境变量 |
 | timeout 行为 | `test/T5-redis_client_timeout.cc` | `T5-redis_client_timeout` | `./<build-dir>/test/T5-redis_client_timeout` | 本地 Redis |
 | raw command API | `test/T10-redis_raw_command_api.cc` | `T10-redis_raw_command_api` | `./<build-dir>/test/T10-redis_raw_command_api` | 无 |
-| RESP3 surface 回归 | `test/T15-resp3_surface.cc` | `T15-resp3_surface` | `./<build-dir>/test/T15-resp3_surface` | 无 |
+| awaitable / pool surface 回归 | `test/T15-awaitable_surface.cc` | `T15-awaitable_surface` | `./<build-dir>/test/T15-awaitable_surface` | 无 |
 | topology + pubsub | `test/T11-topology_and_pubsub.cc` | `T11-topology_and_pubsub` | `./<build-dir>/test/T11-topology_and_pubsub` | 本地 Redis |
 | real cluster + sentinel | `test/T13-integration_cluster_sentinel.cc` | `T13-integration_cluster_sentinel` | `test/integration/run_cluster_sentinel_integration.sh --build-dir <build-dir>` | Docker、`redis-cli` |
 
@@ -156,6 +172,31 @@ Coroutine demo(IOScheduler* scheduler)
 - `B2-connection_pool_bench`
 
 旧文档中的 `B1-RedisClientBench` / `B2-ConnectionPoolBench` 已废弃。当前 README 不再内嵌历史 QPS 数字；如果你需要复现实验命令、输出字段和注意事项，请直接看 [docs/05-性能测试.md](docs/05-性能测试.md)。
+
+## TLS 快速入口
+
+单节点 TLS：
+
+```cpp
+RedissClientConfig tls_config;
+tls_config.ca_path = "/path/to/ca.pem";
+tls_config.verify_peer = true;
+tls_config.server_name = "redis.example.com";
+
+auto client = RedissClientBuilder()
+    .scheduler(scheduler)
+    .tlsConfig(tls_config)
+    .build();
+
+auto connect_result = co_await client.connect("rediss://redis.example.com:6380/0").timeout(std::chrono::seconds(5));
+auto ping_result = co_await client.command(RedisCommandBuilder().ping()).timeout(std::chrono::seconds(5));
+```
+
+拓扑与连接池的 TLS 版本和 TCP 版本保持同构：
+
+- `RedissConnectionPool`
+- `RedissMasterSlaveClientBuilder`
+- `RedissClusterClientBuilder`
 
 ## 已知限制
 

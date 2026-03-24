@@ -3,10 +3,14 @@
 
 #include <galay-kernel/async/TcpSocket.h>
 #include <galay-kernel/kernel/IOScheduler.hpp>
-#include <galay-kernel/kernel/Coroutine.h>
+#include <galay-kernel/kernel/Task.h>
 #include <galay-kernel/kernel/Timeout.hpp>
 #include <galay-kernel/common/Host.hpp>
 #include <galay-kernel/common/Error.h>
+#ifdef GALAY_REDIS_SSL_ENABLED
+#include <galay-ssl/async/SslAwaitableCore.h>
+#endif
+#include <concepts>
 #include <memory>
 #include <string>
 #include <expected>
@@ -17,6 +21,7 @@
 #include <span>
 #include <array>
 #include <string_view>
+#include <sys/uio.h>
 #include "galay-redis/base/RedisError.h"
 #include "galay-redis/base/RedisLog.h"
 #include "galay-redis/base/RedisValue.h"
@@ -29,18 +34,13 @@ namespace galay::redis
 {
     using galay::async::TcpSocket;
     using galay::kernel::IOScheduler;
-    using galay::kernel::Coroutine;
     using galay::kernel::Host;
     using galay::kernel::IOError;
     using galay::kernel::IPType;
-    using galay::kernel::CustomAwaitable;
-    using galay::kernel::SendAwaitable;
-    using galay::kernel::RecvAwaitable;
-    using galay::kernel::ReadvAwaitable;
-    using galay::kernel::ReadvIOContext;
-    using galay::kernel::WritevIOContext;
-    using galay::kernel::WritevAwaitable;
-    using galay::kernel::ConnectAwaitable;
+    using galay::kernel::Task;
+    using galay::kernel::TaskRef;
+
+    using Coroutine = Task<void>;
 
     // 类型别名
     using RedisResult = std::expected<std::vector<RedisValue>, RedisError>;
@@ -54,8 +54,22 @@ namespace galay::redis
         int version = 2;
     };
 
+    struct RedissClientConfig
+    {
+        std::string ca_path;
+        bool verify_peer = false;
+        int verify_depth = 4;
+        std::string server_name;
+    };
+
     // 前向声明
     class RedisClient;
+    class RedissClient;
+
+    namespace detail
+    {
+        struct RedissClientImpl;
+    }
 
     class RedisClientBuilder
     {
@@ -109,6 +123,94 @@ namespace galay::redis
         std::shared_ptr<RedisBufferProvider> m_buffer_provider;
     };
 
+    class RedissClientBuilder
+    {
+    public:
+        RedissClientBuilder& scheduler(IOScheduler* scheduler)
+        {
+            m_scheduler = scheduler;
+            return *this;
+        }
+
+        RedissClientBuilder& config(AsyncRedisConfig config)
+        {
+            m_config = std::move(config);
+            return *this;
+        }
+
+        RedissClientBuilder& tlsConfig(RedissClientConfig config)
+        {
+            m_tls_config = std::move(config);
+            return *this;
+        }
+
+        RedissClientBuilder& sendTimeout(std::chrono::milliseconds timeout)
+        {
+            m_config.send_timeout = timeout;
+            return *this;
+        }
+
+        RedissClientBuilder& recvTimeout(std::chrono::milliseconds timeout)
+        {
+            m_config.recv_timeout = timeout;
+            return *this;
+        }
+
+        RedissClientBuilder& bufferSize(size_t size)
+        {
+            m_config.buffer_size = size;
+            return *this;
+        }
+
+        RedissClientBuilder& bufferProvider(std::shared_ptr<RedisBufferProvider> provider)
+        {
+            m_buffer_provider = std::move(provider);
+            return *this;
+        }
+
+        RedissClientBuilder& caPath(std::string path)
+        {
+            m_tls_config.ca_path = std::move(path);
+            return *this;
+        }
+
+        RedissClientBuilder& verifyPeer(bool verify_peer)
+        {
+            m_tls_config.verify_peer = verify_peer;
+            return *this;
+        }
+
+        RedissClientBuilder& verifyDepth(int verify_depth)
+        {
+            m_tls_config.verify_depth = verify_depth;
+            return *this;
+        }
+
+        RedissClientBuilder& serverName(std::string server_name)
+        {
+            m_tls_config.server_name = std::move(server_name);
+            return *this;
+        }
+
+        RedissClient build() const;
+
+        AsyncRedisConfig buildConfig() const
+        {
+            return m_config;
+        }
+
+        RedissClientConfig buildTlsConfig() const
+        {
+            return m_tls_config;
+        }
+
+    private:
+        IOScheduler* m_scheduler = nullptr;
+        AsyncRedisConfig m_config = AsyncRedisConfig::noTimeout();
+        RedissClientConfig m_tls_config;
+        std::shared_ptr<RedisBufferProvider> m_buffer_provider;
+    };
+
     /**
      * @brief Redis客户端等待体
      * @details 自动处理完整的命令发送和响应接收流程
@@ -123,52 +225,10 @@ namespace galay::redis
      * auto result = co_await client.command(builder.get("key")).timeout(std::chrono::seconds(5));
      * @endcode
      */
-    class RedisClientAwaitable : public galay::kernel::CustomAwaitable,
-                                 public galay::kernel::TimeoutSupport<RedisClientAwaitable>
+    class RedisClientAwaitable : public galay::kernel::TimeoutSupport<RedisClientAwaitable>
     {
     public:
-        class ProtocolSendAwaitable : public WritevIOContext
-        {
-        public:
-            explicit ProtocolSendAwaitable(RedisClientAwaitable* owner);
-
-#ifdef USE_IOURING
-            bool handleComplete(struct io_uring_cqe* cqe, GHandle) override;
-#else
-            bool handleComplete(GHandle handle) override;
-#endif
-
-            void rebind(RedisClientAwaitable* owner);
-
-        private:
-            int pendingIovCount();
-            bool advanceAfterWrite(size_t sent_bytes);
-            void syncContextIovecs();
-
-            RedisClientAwaitable* m_owner;
-            std::vector<struct iovec> m_iovecs;
-        };
-
-        class ProtocolRecvAwaitable : public ReadvIOContext
-        {
-        public:
-            explicit ProtocolRecvAwaitable(RedisClientAwaitable* owner);
-
-#ifdef USE_IOURING
-            bool handleComplete(struct io_uring_cqe* cqe, GHandle) override;
-#else
-            bool handleComplete(GHandle handle) override;
-#endif
-
-            void rebind(RedisClientAwaitable* owner);
-
-        private:
-            bool prepareRecvWindow();
-            void syncContextIovecs();
-
-            RedisClientAwaitable* m_owner;
-            std::vector<struct iovec> m_iovecs;
-        };
+        using Result = std::expected<std::optional<std::vector<RedisValue>>, RedisError>;
 
         /**
          * @brief 构造函数
@@ -183,70 +243,83 @@ namespace galay::redis
 
         RedisClientAwaitable(const RedisClientAwaitable&) = delete;
         RedisClientAwaitable& operator=(const RedisClientAwaitable&) = delete;
-        RedisClientAwaitable(RedisClientAwaitable&& other) noexcept;
-        RedisClientAwaitable& operator=(RedisClientAwaitable&& other) noexcept;
+        RedisClientAwaitable(RedisClientAwaitable&&) noexcept = default;
+        RedisClientAwaitable& operator=(RedisClientAwaitable&&) noexcept = default;
 
-        bool await_ready() const noexcept {
-            return false;
+        bool await_ready() { return m_inner.await_ready(); }
+        template <typename Promise>
+        bool await_suspend(std::coroutine_handle<Promise> handle)
+        {
+            return m_inner.await_suspend(handle);
         }
-
-        using galay::kernel::CustomAwaitable::await_suspend;
-
-        std::expected<std::optional<std::vector<RedisValue>>, RedisError> await_resume();
+        Result await_resume() { return m_inner.await_resume(); }
+        void markTimeout() { m_inner.markTimeout(); }
 
         /**
          * @brief 检查状态是否为 Invalid
          * @return true 如果状态为 Invalid
          */
-        bool isInvalid() const noexcept {
-            return m_state == State::Invalid;
-        }
+        bool isInvalid() const noexcept;
 
         /**
          * @brief 重置状态并清理资源
          * @details 在错误发生时调用，确保资源正确清理
          */
-        void reset() noexcept {
-            m_state = State::Invalid;
-            m_send_awaitable.rebind(this);
-            m_recv_awaitable.rebind(this);
-            m_values.clear();
-            m_parse_buffer.clear();
-            m_internal_error.reset();
-            m_result = std::nullopt;  // 重置为 nullopt
-        }
+        void reset() noexcept;
 
     private:
-        enum class State {
-            Running,           // 正在执行链式 SEND -> RECV
-            Invalid            // 无效状态，可以重新创建
+        enum class Phase : uint8_t {
+            Invalid,
+            Start,
+            Send,
+            Parse,
+            Done
         };
 
-        void initTaskQueue();
-        void moveFrom(RedisClientAwaitable&& other) noexcept;
-        void markMovedFrom() noexcept;
-        bool parseResponsesFromRingBuffer();
-        void setSendError(const IOError& io_error);
-        void setRecvError(const IOError& io_error);
-        void setParseError();
-        void setConnectionClosedError();
-        void setBufferOverflowError();
+        struct SharedState {
+            SharedState(RedisClient& client,
+                        std::string encoded_command,
+                        size_t expected_replies,
+                        bool recv_only);
 
-        RedisClient* m_client;
-        std::string m_encoded_cmd;
-        std::string m_parse_buffer;
-        size_t m_expected_replies;
-        bool m_recv_only;
-        std::vector<RedisValue> m_values;
-        State m_state;
-        ProtocolSendAwaitable m_send_awaitable;
-        ProtocolRecvAwaitable m_recv_awaitable;
-        std::optional<RedisError> m_internal_error;
+            RedisClient* client = nullptr;
+            std::string encoded_cmd;
+            size_t expected_replies = 0;
+            bool recv_only = false;
+            size_t sent = 0;
+            Phase phase = Phase::Start;
+            std::vector<RedisValue> values;
+            std::string parse_buffer;
+            std::array<struct iovec, 2> read_iovecs{};
+            size_t read_iov_count = 0;
+            std::optional<Result> result;
+        };
 
-    public:
-        // TimeoutSupport 需要访问此成员来设置超时错误
-        // 注意：这里使用 IOError 类型，因为 TimeoutSupport 会设置 IOError
-        std::expected<std::optional<std::vector<RedisValue>>, galay::kernel::IOError> m_result;
+        struct Machine {
+            using result_type = Result;
+            static constexpr galay::kernel::SequenceOwnerDomain kSequenceOwnerDomain =
+                galay::kernel::SequenceOwnerDomain::ReadWrite;
+
+            explicit Machine(std::shared_ptr<SharedState> state);
+
+            galay::kernel::MachineAction<result_type> advance();
+            void onRead(std::expected<size_t, IOError> result);
+            void onWrite(std::expected<size_t, IOError> result);
+
+        private:
+            bool prepareReadWindow();
+            std::expected<bool, RedisError> tryParseReplies();
+            void setError(RedisError error) noexcept;
+            void setSendError(const IOError& io_error) noexcept;
+            void setRecvError(const IOError& io_error) noexcept;
+
+            std::shared_ptr<SharedState> m_state;
+        };
+
+        using InnerAwaitable = galay::kernel::StateMachineAwaitable<Machine>;
+
+        std::shared_ptr<SharedState> m_state;
+        InnerAwaitable m_inner;
     };
 
     /**
@@ -260,125 +333,86 @@ namespace galay::redis
      * auto result = co_await client.batch(builder.commands()).timeout(std::chrono::seconds(10));
      * @endcode
      */
-    class RedisPipelineAwaitable : public galay::kernel::CustomAwaitable,
-                                   public galay::kernel::TimeoutSupport<RedisPipelineAwaitable>
+    class RedisPipelineAwaitable : public galay::kernel::TimeoutSupport<RedisPipelineAwaitable>
     {
     public:
-        class ProtocolSendAwaitable : public WritevIOContext
-        {
-        public:
-            explicit ProtocolSendAwaitable(RedisPipelineAwaitable* owner);
-
-#ifdef USE_IOURING
-            bool handleComplete(struct io_uring_cqe* cqe, GHandle) override;
-#else
-            bool handleComplete(GHandle handle) override;
-#endif
-
-            void rebind(RedisPipelineAwaitable* owner);
-
-        private:
-            void refillIovWindow();
-            int pendingIovCount();
-            bool advanceAfterWrite(size_t sent_bytes);
-            void syncContextIovecs();
-
-            RedisPipelineAwaitable* m_owner;
-            size_t m_iov_cursor = 0;
-            size_t m_next_command_index = 0;
-            std::vector<struct iovec> m_iovecs;
-        };
-
-        class ProtocolRecvAwaitable : public ReadvIOContext
-        {
-        public:
-            explicit ProtocolRecvAwaitable(RedisPipelineAwaitable* owner);
-
-#ifdef USE_IOURING
-            bool handleComplete(struct io_uring_cqe* cqe, GHandle) override;
-#else
-            bool handleComplete(GHandle handle) override;
-#endif
-
-            void rebind(RedisPipelineAwaitable* owner);
-
-        private:
-            bool prepareRecvWindow();
-            void syncContextIovecs();
-
-            RedisPipelineAwaitable* m_owner;
-            std::vector<struct iovec> m_iovecs;
-        };
+        using Result = std::expected<std::optional<std::vector<RedisValue>>, RedisError>;
 
         RedisPipelineAwaitable(RedisClient& client,
                               std::span<const RedisCommandView> commands);
 
         RedisPipelineAwaitable(const RedisPipelineAwaitable&) = delete;
         RedisPipelineAwaitable& operator=(const RedisPipelineAwaitable&) = delete;
-        RedisPipelineAwaitable(RedisPipelineAwaitable&& other) noexcept;
-        RedisPipelineAwaitable& operator=(RedisPipelineAwaitable&& other) noexcept;
+        RedisPipelineAwaitable(RedisPipelineAwaitable&&) noexcept = default;
+        RedisPipelineAwaitable& operator=(RedisPipelineAwaitable&&) noexcept = default;
 
-        bool await_ready() const noexcept {
-            return false;
+        bool await_ready() { return m_inner.await_ready(); }
+        template <typename Promise>
+        bool await_suspend(std::coroutine_handle<Promise> handle)
+        {
+            return m_inner.await_suspend(handle);
         }
+        Result await_resume() { return m_inner.await_resume(); }
+        void markTimeout() { m_inner.markTimeout(); }
 
-        using galay::kernel::CustomAwaitable::await_suspend;
-
-        std::expected<std::optional<std::vector<RedisValue>>, RedisError> await_resume();
-
-        bool isInvalid() const noexcept {
-            return m_state == State::Invalid;
-        }
+        bool isInvalid() const noexcept;
 
         /**
          * @brief 重置状态并清理资源
          * @details 在错误发生时调用，确保资源正确清理
          */
-        void reset() noexcept {
-            m_state = State::Invalid;
-            m_send_awaitable.rebind(this);
-            m_recv_awaitable.rebind(this);
-            m_values.clear();
-            m_parse_buffer.clear();
-            m_internal_error.reset();
-            m_result = std::nullopt;
-        }
+        void reset() noexcept;
 
     private:
-        enum class State {
-            Running,
-            Invalid
+        enum class Phase : uint8_t {
+            Invalid,
+            Start,
+            Send,
+            Parse,
+            Done
         };
 
-        struct EncodedSlice {
-            size_t offset = 0;
-            size_t length = 0;
+        struct SharedState {
+            SharedState(RedisClient& client,
+                        std::span<const RedisCommandView> commands);
+
+            RedisClient* client = nullptr;
+            std::string encoded_buffer;
+            size_t expected_replies = 0;
+            size_t sent = 0;
+            Phase phase = Phase::Start;
+            std::vector<RedisValue> values;
+            std::string parse_buffer;
+            std::array<struct iovec, 2> read_iovecs{};
+            size_t read_iov_count = 0;
+            std::optional<Result> result;
         };
 
-        void initTaskQueue();
-        void moveFrom(RedisPipelineAwaitable&& other) noexcept;
-        void markMovedFrom() noexcept;
-        bool parseResponsesFromRingBuffer();
-        void setSendError(const IOError& io_error);
-        void setRecvError(const IOError& io_error);
-        void setParseError();
-        void setConnectionClosedError();
-        void setBufferOverflowError();
+        struct Machine {
+            using result_type = Result;
+            static constexpr galay::kernel::SequenceOwnerDomain kSequenceOwnerDomain =
+                galay::kernel::SequenceOwnerDomain::ReadWrite;
 
-        RedisClient* m_client;
-        size_t m_expected_replies = 0;
-        std::string m_encoded_buffer;
-        std::vector<EncodedSlice> m_encoded_slices;
-        std::string m_parse_buffer;
-        std::vector<RedisValue> m_values;
-        State m_state;
-        ProtocolSendAwaitable m_send_awaitable;
-        ProtocolRecvAwaitable m_recv_awaitable;
-        std::optional<RedisError> m_internal_error;
+            explicit Machine(std::shared_ptr<SharedState> state);
 
-    public:
-        // TimeoutSupport 需要访问此成员来设置超时错误
-        std::expected<std::optional<std::vector<RedisValue>>, galay::kernel::IOError> m_result;
+            galay::kernel::MachineAction<result_type> advance();
+            void onRead(std::expected<size_t, IOError> result);
+            void onWrite(std::expected<size_t, IOError> result);
+
+        private:
+            bool prepareReadWindow();
+            std::expected<bool, RedisError> tryParseReplies();
+            void setError(RedisError error) noexcept;
+            void setSendError(const IOError& io_error) noexcept;
+            void setRecvError(const IOError& io_error) noexcept;
+
+            std::shared_ptr<SharedState> m_state;
+        };
+
+        using InnerAwaitable = galay::kernel::StateMachineAwaitable<Machine>;
+
+        std::shared_ptr<SharedState> m_state;
+        InnerAwaitable m_inner;
     };
 
     /**
@@ -396,50 +430,286 @@ namespace galay::redis
                              int32_t db_index,
                              int version);
 
-        bool await_ready() const noexcept {
-            return false;
+        RedisConnectAwaitable(const RedisConnectAwaitable&) = delete;
+        RedisConnectAwaitable& operator=(const RedisConnectAwaitable&) = delete;
+        RedisConnectAwaitable(RedisConnectAwaitable&&) noexcept = default;
+        RedisConnectAwaitable& operator=(RedisConnectAwaitable&&) noexcept = default;
+
+        bool await_ready() { return m_inner.await_ready(); }
+        template <typename Promise>
+        bool await_suspend(std::coroutine_handle<Promise> handle)
+        {
+            return m_inner.await_suspend(handle);
         }
+        RedisVoidResult await_resume() { return m_inner.await_resume(); }
+        void markTimeout() { m_inner.markTimeout(); }
 
-        bool await_suspend(std::coroutine_handle<> handle);
-
-        RedisVoidResult await_resume();
-
-        bool isInvalid() const {
-            return m_state == State::Invalid;
-        }
+        bool isInvalid() const;
+        void reset() noexcept;
 
     private:
-        enum class State {
+        enum class Phase : uint8_t {
             Invalid,
-            Connecting,
-            Authenticating,
-            SelectingDB,
+            Connect,
+            Send,
+            Parse,
             Done
         };
 
-        RedisClient* m_client;
-        std::string m_ip;
-        int32_t m_port;
-        std::string m_username;
-        std::string m_password;
-        int32_t m_db_index;
-        int m_version;
-        State m_state;
+        enum class PendingCommand : uint8_t {
+            None,
+            Auth,
+            Select
+        };
 
-        std::optional<galay::kernel::ConnectAwaitable> m_connect_awaitable;
-        std::optional<WritevAwaitable> m_send_awaitable;
-        std::optional<ReadvAwaitable> m_recv_awaitable;
-        std::array<struct iovec, 1> m_send_iovec{};
-        std::array<struct iovec, 2> m_recv_iovecs{};
-        std::vector<RedisValue> m_temp_values;
-        std::string m_encoded_cmd;
-        std::string m_parse_buffer;
-        size_t m_sent;
+        struct SharedState {
+            SharedState(RedisClient& client,
+                        std::string ip,
+                        int32_t port,
+                        std::string username,
+                        std::string password,
+                        int32_t db_index,
+                        int version);
 
-    public:
-        // TimeoutSupport 需要访问此成员来设置超时错误
-        std::expected<void, galay::kernel::IOError> m_result;
+            RedisClient* client = nullptr;
+            std::string ip;
+            int32_t port = 0;
+            std::string username;
+            std::string password;
+            int32_t db_index = 0;
+            int version = 2;
+            galay::kernel::Host host;
+            size_t sent = 0;
+            bool auth_sent = false;
+            bool select_sent = false;
+            PendingCommand pending_command = PendingCommand::None;
+            std::string encoded_cmd;
+            std::string parse_buffer;
+            std::vector<RedisValue> values;
+            Phase phase = Phase::Connect;
+            std::array<struct iovec, 2> read_iovecs{};
+            size_t read_iov_count = 0;
+            std::optional<RedisVoidResult> result;
+        };
+
+        struct Machine {
+            using result_type = RedisVoidResult;
+            static constexpr galay::kernel::SequenceOwnerDomain kSequenceOwnerDomain =
+                galay::kernel::SequenceOwnerDomain::ReadWrite;
+
+            explicit Machine(std::shared_ptr<SharedState> state);
+
+            galay::kernel::MachineAction<result_type> advance();
+            void onConnect(std::expected<void, IOError> result);
+            void onRead(std::expected<size_t, IOError> result);
+            void onWrite(std::expected<size_t, IOError> result);
+
+        private:
+            bool prepareReadWindow();
+            bool prepareNextCommand();
+            std::expected<bool, RedisError> tryParseReply();
+            void setError(RedisError error) noexcept;
+            void setConnectError(const IOError& io_error) noexcept;
+            void setSendError(const IOError& io_error) noexcept;
+            void setRecvError(const IOError& io_error) noexcept;
+
+            std::shared_ptr<SharedState> m_state;
+        };
+
+        using InnerAwaitable = galay::kernel::StateMachineAwaitable<Machine>;
+
+        std::shared_ptr<SharedState> m_state;
+        InnerAwaitable m_inner;
     };
+
+#ifdef GALAY_REDIS_SSL_ENABLED
+    namespace detail
+    {
+        using RedissCommandResult =
+            std::expected<std::optional<std::vector<RedisValue>>, RedisError>;
+
+        struct RedissExchangeSharedState
+        {
+            enum class Phase : uint8_t {
+                Invalid,
+                Start,
+                Send,
+                Parse,
+                Done
+            };
+
+            RedissExchangeSharedState(RedissClientImpl* impl,
+                                      std::string encoded_command,
+                                      size_t expected_replies,
+                                      bool recv_only);
+
+            RedissClientImpl* impl = nullptr;
+            std::string encoded_cmd;
+            size_t expected_replies = 0;
+            bool recv_only = false;
+            size_t sent = 0;
+            Phase phase = Phase::Start;
+            std::vector<RedisValue> values;
+            std::string parse_buffer;
+            std::array<struct iovec, 2> read_iovecs{};
+            size_t read_iov_count = 0;
+            char* read_buffer = nullptr;
+            size_t read_length = 0;
+            std::optional<RedissCommandResult> result;
+        };
+
+        struct RedissExchangeMachine
+        {
+            using result_type = RedissCommandResult;
+            static constexpr galay::kernel::SequenceOwnerDomain kSequenceOwnerDomain =
+                galay::kernel::SequenceOwnerDomain::ReadWrite;
+
+            explicit RedissExchangeMachine(std::shared_ptr<RedissExchangeSharedState> state);
+
+            galay::kernel::MachineAction<result_type> advance();
+            void onRead(std::expected<size_t, IOError> result);
+            void onWrite(std::expected<size_t, IOError> result);
+
+        private:
+            bool prepareReadWindow();
+            std::expected<bool, RedisError> tryParseReplies();
+            galay::kernel::MachineAction<result_type> advanceSsl();
+            void setError(RedisError error) noexcept;
+            void setSendError(const galay::ssl::SslError& ssl_error) noexcept;
+            void setRecvError(const galay::ssl::SslError& ssl_error) noexcept;
+            void handleSendResult(std::expected<size_t, galay::ssl::SslError> result);
+            void handleRecvResult(std::expected<galay::kernel::Bytes, galay::ssl::SslError> result);
+
+            std::shared_ptr<RedissExchangeSharedState> m_state;
+            galay::ssl::SslOperationDriver m_driver;
+            bool m_ssl_active = false;
+        };
+
+        struct RedissConnectSharedState
+        {
+            enum class Phase : uint8_t {
+                Invalid,
+                Connect,
+                Handshake,
+                Send,
+                Parse,
+                Done
+            };
+
+            enum class PendingCommand : uint8_t {
+                None,
+                Auth,
+                Select
+            };
+
+            RedissConnectSharedState(RedissClientImpl* impl,
+                                     std::string ip,
+                                     int32_t port,
+                                     RedisConnectOptions options);
+
+            RedissClientImpl* impl = nullptr;
+            std::string ip;
+            int32_t port = 0;
+            RedisConnectOptions options;
+            galay::kernel::Host host;
+            size_t sent = 0;
+            bool auth_sent = false;
+            bool select_sent = false;
+            PendingCommand pending_command = PendingCommand::None;
+            std::string encoded_cmd;
+            std::string parse_buffer;
+            std::vector<RedisValue> values;
+            Phase phase = Phase::Connect;
+            std::array<struct iovec, 2> read_iovecs{};
+            size_t read_iov_count = 0;
+            char* read_buffer = nullptr;
+            size_t read_length = 0;
+            std::optional<RedisVoidResult> result;
+        };
+
+        struct RedissConnectMachine
+        {
+            using result_type = RedisVoidResult;
+            static constexpr galay::kernel::SequenceOwnerDomain kSequenceOwnerDomain =
+                galay::kernel::SequenceOwnerDomain::ReadWrite;
+
+            explicit RedissConnectMachine(std::shared_ptr<RedissConnectSharedState> state);
+
+            galay::kernel::MachineAction<result_type> advance();
+            void onConnect(std::expected<void, IOError> result);
+            void onRead(std::expected<size_t, IOError> result);
+            void onWrite(std::expected<size_t, IOError> result);
+
+        private:
+            bool prepareReadWindow();
+            bool prepareNextCommand();
+            std::expected<bool, RedisError> tryParseReply();
+            galay::kernel::MachineAction<result_type> advanceSsl();
+            void setError(RedisError error) noexcept;
+            void setConnectError(const IOError& io_error) noexcept;
+            void setSendError(const galay::ssl::SslError& ssl_error) noexcept;
+            void setRecvError(const galay::ssl::SslError& ssl_error) noexcept;
+            void handleHandshakeResult(std::expected<void, galay::ssl::SslError> result);
+            void handleSendResult(std::expected<size_t, galay::ssl::SslError> result);
+            void handleRecvResult(std::expected<galay::kernel::Bytes, galay::ssl::SslError> result);
+
+            std::shared_ptr<RedissConnectSharedState> m_state;
+            galay::ssl::SslOperationDriver m_driver;
+            bool m_ssl_active = false;
+        };
+        using RedissExchangeOperation =
+            galay::kernel::StateMachineAwaitable<RedissExchangeMachine>;
+        using RedissConnectOperation =
+            galay::kernel::StateMachineAwaitable<RedissConnectMachine>;
+    } // namespace detail
+#else
+    namespace detail
+    {
+        class RedissExchangeOperation : public galay::kernel::TimeoutSupport<RedissExchangeOperation>
+        {
+        public:
+            using Result = std::expected<std::optional<std::vector<RedisValue>>, RedisError>;
+
+            RedissExchangeOperation();
+            explicit RedissExchangeOperation(Result ready_result);
+
+            bool await_ready() { return true; }
+            template <typename Promise>
+            bool await_suspend(std::coroutine_handle<Promise>)
+            {
+                return false;
+            }
+            Result await_resume() { return std::move(m_ready_result); }
+            void markTimeout();
+
+        private:
+            Result m_ready_result = std::unexpected(RedisError(
+                RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
+                "galay-redis was built without SSL support"));
+        };
+
+        class RedissConnectOperation : public galay::kernel::TimeoutSupport<RedissConnectOperation>
+        {
+        public:
+            RedissConnectOperation();
+            explicit RedissConnectOperation(RedisVoidResult ready_result);
+
+            bool await_ready() { return true; }
+            template <typename Promise>
+            bool await_suspend(std::coroutine_handle<Promise>)
+            {
+                return false;
+            }
+            RedisVoidResult await_resume() { return std::move(m_ready_result); }
+            void markTimeout();
+
+        private:
+            RedisVoidResult m_ready_result = std::unexpected(RedisError(
+                RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
+                "galay-redis was built without SSL support"));
+        };
+    } // namespace detail
+#endif
 
     /**
      * @brief Redis客户端类
@@ -494,6 +764,11 @@ namespace galay::redis
 
         RedisLoggerPtr& logger() { return m_logger; }
         void setLogger(RedisLoggerPtr logger) { m_logger = std::move(logger); }
+        TcpSocket& socket() { return m_socket; }
+        protocol::RespParser& parser() { return m_parser; }
+        RedisBufferProvider& bufferProvider() { return *m_buffer_provider; }
+        const AsyncRedisConfig& asyncConfig() const { return m_config; }
+        void setClosed(bool closed) { m_is_closed = closed; }
 
         auto close() {
             return m_socket.close();
@@ -519,9 +794,48 @@ namespace galay::redis
         RedisLoggerPtr m_logger;
     };
 
+    class RedissClient
+    {
+    public:
+        RedissClient(IOScheduler* scheduler,
+                     AsyncRedisConfig config = AsyncRedisConfig::noTimeout(),
+                     RedissClientConfig tls_config = {},
+                     std::shared_ptr<RedisBufferProvider> buffer_provider = nullptr);
+        RedissClient(RedissClient&& other) noexcept;
+        RedissClient& operator=(RedissClient&& other) noexcept;
+        RedissClient(const RedissClient&) = delete;
+        RedissClient& operator=(const RedissClient&) = delete;
+        ~RedissClient();
+
+        detail::RedissConnectOperation connect(const std::string& url);
+        detail::RedissConnectOperation connect(const std::string& ip,
+                                              int32_t port,
+                                              RedisConnectOptions options = {});
+
+        detail::RedissExchangeOperation command(RedisEncodedCommand command_packet);
+        detail::RedissExchangeOperation receive(size_t expected_replies = 1);
+        detail::RedissExchangeOperation batch(std::span<const RedisCommandView> commands);
+
+        RedisLoggerPtr& logger();
+        void setLogger(RedisLoggerPtr logger);
+        const AsyncRedisConfig& asyncConfig() const;
+        const RedissClientConfig& tlsConfig() const;
+        bool isClosed() const;
+        void setClosed(bool closed);
+        galay::kernel::CloseAwaitable close();
+
+    private:
+        std::unique_ptr<detail::RedissClientImpl> m_impl;
+    };
+
     inline galay::redis::RedisClient galay::redis::RedisClientBuilder::build() const
     {
         return RedisClient(m_scheduler, m_config, m_buffer_provider);
+    }
+
+    inline galay::redis::RedissClient galay::redis::RedissClientBuilder::build() const
+    {
+        return RedissClient(m_scheduler, m_config, m_tls_config, m_buffer_provider);
     }
 
 }

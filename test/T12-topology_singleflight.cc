@@ -15,17 +15,29 @@ namespace
         void start() override {}
         void stop() override {}
 
-        bool spawn(Coroutine co) override
+        bool schedule(TaskRef task) override
         {
-            co.belongScheduler(this);
+            if (!bindTask(task)) {
+                return false;
+            }
             ++m_spawn_count;
-            m_pending.push_back(std::move(co));
+            m_pending.push_back(std::move(task));
             return true;
         }
 
-        bool spawnImmidiately(Coroutine co) override
+        bool scheduleDeferred(TaskRef task) override
         {
-            return spawn(std::move(co));
+            return schedule(std::move(task));
+        }
+
+        bool scheduleImmediately(TaskRef task) override
+        {
+            if (!bindTask(task)) {
+                return false;
+            }
+            ++m_spawn_count;
+            resume(task);
+            return true;
         }
 
         int addAccept(IOController*) override { return -1; }
@@ -41,7 +53,7 @@ namespace
         int addSendTo(IOController*) override { return -1; }
         int addFileWatch(IOController*) override { return -1; }
         int addSendFile(IOController*) override { return -1; }
-        int addCustom(IOController*) override { return -1; }
+        int addSequence(IOController*) override { return -1; }
         int remove(IOController*) override { return -1; }
 
         size_t spawnCount() const noexcept { return m_spawn_count; }
@@ -49,15 +61,15 @@ namespace
         void drain()
         {
             while (!m_pending.empty()) {
-                auto co = std::move(m_pending.back());
+                auto task = std::move(m_pending.back());
                 m_pending.pop_back();
-                resume(co);
+                resume(task);
             }
         }
 
     private:
         size_t m_spawn_count = 0;
-        std::vector<Coroutine> m_pending;
+        std::vector<TaskRef> m_pending;
     };
 
     int g_failures = 0;
@@ -73,21 +85,21 @@ namespace
 
 int main()
 {
-    std::cout << "Running topology single-flight tests..." << std::endl;
+    std::cout << "Running topology task laziness tests..." << std::endl;
 
     {
         CountingHoldScheduler scheduler;
         auto ms = RedisMasterSlaveClientBuilder().scheduler(&scheduler).build();
 
-        (void)ms.refreshFromSentinel();
-        (void)ms.refreshFromSentinel();
-        (void)ms.refreshFromSentinel();
-        expectEqual("refreshFromSentinel burst spawn count", scheduler.spawnCount(), 1);
+        auto refresh1 = ms.refreshFromSentinel();
+        auto refresh2 = ms.refreshFromSentinel();
+        auto refresh3 = ms.refreshFromSentinel();
+        expectEqual("refreshFromSentinel task creation should be lazy", scheduler.spawnCount(), 0);
 
-        scheduler.drain();
-
-        (void)ms.refreshFromSentinel();
-        expectEqual("refreshFromSentinel next wave spawn count", scheduler.spawnCount(), 2);
+        scheduleTask(&scheduler, std::move(refresh1));
+        scheduleTask(&scheduler, std::move(refresh2));
+        scheduleTask(&scheduler, std::move(refresh3));
+        expectEqual("refreshFromSentinel scheduled task count", scheduler.spawnCount(), 3);
         scheduler.drain();
     }
 
@@ -95,24 +107,23 @@ int main()
         CountingHoldScheduler scheduler;
         auto cluster = RedisClusterClientBuilder().scheduler(&scheduler).build();
 
-        (void)cluster.refreshSlots();
-        (void)cluster.refreshSlots();
-        (void)cluster.refreshSlots();
-        expectEqual("refreshSlots burst spawn count", scheduler.spawnCount(), 1);
+        auto refresh1 = cluster.refreshSlots();
+        auto refresh2 = cluster.refreshSlots();
+        auto refresh3 = cluster.refreshSlots();
+        expectEqual("refreshSlots task creation should be lazy", scheduler.spawnCount(), 0);
 
-        scheduler.drain();
-
-        (void)cluster.refreshSlots();
-        expectEqual("refreshSlots next wave spawn count", scheduler.spawnCount(), 2);
+        scheduleTask(&scheduler, std::move(refresh1));
+        scheduleTask(&scheduler, std::move(refresh2));
+        scheduleTask(&scheduler, std::move(refresh3));
+        expectEqual("refreshSlots scheduled task count", scheduler.spawnCount(), 3);
         scheduler.drain();
     }
 
     if (g_failures != 0) {
-        std::cerr << "[FAILED] topology single-flight tests failed, count=" << g_failures << std::endl;
+        std::cerr << "[FAILED] topology task laziness tests failed, count=" << g_failures << std::endl;
         return 1;
     }
 
-    std::cout << "[PASSED] topology single-flight tests passed" << std::endl;
+    std::cout << "[PASSED] topology task laziness tests passed" << std::endl;
     return 0;
 }
-

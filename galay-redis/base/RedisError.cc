@@ -38,6 +38,29 @@ namespace galay::redis
     {
     }
 
+    RedisError::RedisError(const galay::kernel::IOError& io_error)
+        : m_type(REDIS_ERROR_TYPE_NETWORK_ERROR)
+        , m_extra_msg(io_error.message())
+    {
+        using galay::kernel::IOError;
+        using namespace galay::kernel;
+
+        if (IOError::contains(io_error.code(), kTimeout)) {
+            m_type = REDIS_ERROR_TYPE_TIMEOUT_ERROR;
+            return;
+        }
+        if (IOError::contains(io_error.code(), kDisconnectError)) {
+            m_type = REDIS_ERROR_TYPE_CONNECTION_CLOSED;
+            return;
+        }
+        if (IOError::contains(io_error.code(), kNotRunningOnIOScheduler) ||
+            IOError::contains(io_error.code(), kNotReady)) {
+            m_type = REDIS_ERROR_TYPE_INTERNAL_ERROR;
+            return;
+        }
+        m_type = REDIS_ERROR_TYPE_CONNECTION_ERROR;
+    }
+
     RedisErrorType RedisError::type() const
     {
         return m_type;

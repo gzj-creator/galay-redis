@@ -50,11 +50,14 @@
 #if __has_include(<galay-kernel/concurrency/AsyncWaiter.h>)
 #include <galay-kernel/concurrency/AsyncWaiter.h>
 #endif
-#if __has_include(<galay-kernel/kernel/Coroutine.h>)
-#include <galay-kernel/kernel/Coroutine.h>
+#if __has_include(<galay-kernel/kernel/Awaitable.h>)
+#include <galay-kernel/kernel/Awaitable.h>
 #endif
 #if __has_include(<galay-kernel/kernel/IOScheduler.hpp>)
 #include <galay-kernel/kernel/IOScheduler.hpp>
+#endif
+#if __has_include(<galay-kernel/kernel/Task.h>)
+#include <galay-kernel/kernel/Task.h>
 #endif
 #if __has_include(<galay-kernel/kernel/Timeout.hpp>)
 #include <galay-kernel/kernel/Timeout.hpp>
@@ -100,4 +103,13 @@
 #endif
 #if __has_include(<vector>)
 #include <vector>
+#endif
+#if __has_include(<galay-ssl/async/SslAwaitableCore.h>)
+#include <galay-ssl/async/SslAwaitableCore.h>
+#endif
+#if __has_include(<galay-ssl/async/SslSocket.h>)
+#include <galay-ssl/async/SslSocket.h>
+#endif
+#if __has_include(<galay-ssl/ssl/SslContext.h>)
+#include <galay-ssl/ssl/SslContext.h>
 #endif

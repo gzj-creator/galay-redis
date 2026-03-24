@@ -536,10 +536,10 @@ int main()
         }
 
         // 运行所有命令测试
-        scheduler->spawn(testAllRedisCommands(scheduler));
+        scheduleTask(scheduler, testAllRedisCommands(scheduler));
 
         // 运行通用execute命令测试
-        scheduler->spawn(testExecuteCommand(scheduler));
+        scheduleTask(scheduler, testExecuteCommand(scheduler));
 
         // 等待测试完成
         std::this_thread::sleep_for(std::chrono::seconds(15));

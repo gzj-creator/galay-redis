@@ -1,6 +1,7 @@
 #ifndef GALAY_REDIS_ERROR_H
 #define GALAY_REDIS_ERROR_H
 
+#include <galay-kernel/common/Error.h>
 #include <string>
 
 namespace galay::redis 
@@ -44,6 +45,7 @@ namespace galay::redis
     public:
         RedisError(RedisErrorType type);
         RedisError(RedisErrorType type, std::string extra_msg);
+        RedisError(const galay::kernel::IOError& io_error);
         RedisErrorType type() const;
         std::string message() const;
     private:

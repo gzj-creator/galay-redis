@@ -9,6 +9,7 @@ endif()
 option(BUILD_TESTS "Build test executables" ON)
 option(BUILD_BENCHMARKS "Build benchmark executables" ON)
 option(BUILD_EXAMPLES "Build example executables" ON)
+option(GALAY_REDIS_ENABLE_SSL "Enable SSL/TLS support (requires galay-ssl)" OFF)
 
 # 库类型选项（CMake 标准变量）
 option(BUILD_SHARED_LIBS "Build shared library instead of static" ON)

@@ -180,7 +180,7 @@ int main(int argc, char* argv[])
     }
 
     DemoState state;
-    scheduler->spawn(runDemo(scheduler, &state, host, port, key_prefix, batch_size));
+    scheduleTask(scheduler, runDemo(scheduler, &state, host, port, key_prefix, batch_size));
 
     std::unique_lock<std::mutex> lock(state.mutex);
     const bool finished = state.cv.wait_for(lock, std::chrono::seconds(15), [&]() {

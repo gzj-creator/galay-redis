@@ -3,6 +3,14 @@ find_package(galay-utils REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(spdlog REQUIRED)
 
+if(GALAY_REDIS_ENABLE_SSL)
+    find_package(galay-ssl REQUIRED)
+
+    if(NOT TARGET galay-ssl::galay-ssl)
+        message(FATAL_ERROR "galay-ssl::galay-ssl target not found. Please install galay-ssl or disable GALAY_REDIS_ENABLE_SSL.")
+    endif()
+endif()
+
 option(GALAY_REDIS_INSTALL_MODULE_INTERFACE "Install C++ module interface files (*.cppm)" ON)
 option(GALAY_REDIS_ENABLE_IMPORT_COMPILATION "Enable C++ import/module compilation path" ON)
 
@@ -86,6 +94,15 @@ if(NOT TARGET galay::galay-utils)
 endif()
 
 add_library(${PROJECT_NAME} SHARED ${SOURCES})
+set_property(TARGET ${PROJECT_NAME} PROPERTY NO_SYSTEM_FROM_IMPORTED ON)
+
+get_target_property(GALAY_REDIS_KERNEL_INCLUDE_DIRS galay-kernel::galay-kernel INTERFACE_INCLUDE_DIRECTORIES)
+if(GALAY_REDIS_KERNEL_INCLUDE_DIRS)
+    foreach(GALAY_REDIS_KERNEL_INCLUDE_DIR ${GALAY_REDIS_KERNEL_INCLUDE_DIRS})
+        target_compile_options(${PROJECT_NAME} BEFORE PUBLIC "-I${GALAY_REDIS_KERNEL_INCLUDE_DIR}")
+    endforeach()
+    target_include_directories(${PROJECT_NAME} BEFORE PUBLIC ${GALAY_REDIS_KERNEL_INCLUDE_DIRS})
+endif()
 
 # 链接 galay-kernel 和 galay-utils 库
 target_link_libraries(${PROJECT_NAME}
@@ -94,6 +111,15 @@ target_link_libraries(${PROJECT_NAME}
     PUBLIC OpenSSL::SSL    # 使用OpenSSL目标
     PUBLIC OpenSSL::Crypto # 使用OpenSSL目标
 )
+
+if(GALAY_REDIS_ENABLE_SSL)
+    target_link_libraries(${PROJECT_NAME}
+        PUBLIC galay-ssl::galay-ssl
+    )
+    target_compile_definitions(${PROJECT_NAME}
+        PUBLIC GALAY_REDIS_SSL_ENABLED
+    )
+endif()
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${OPENSSL_INCLUDE_DIR})
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

@@ -280,7 +280,7 @@ Coroutine runBenchmark(
 
     const auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < options->workers; ++i) {
-        scheduler->spawn(poolWorker(pool, options, &stats, i, remaining, done_waiter));
+        scheduleTask(scheduler, poolWorker(pool, options, &stats, i, remaining, done_waiter));
     }
 
     auto all_done = co_await done_waiter->wait().timeout(std::chrono::seconds(180));
@@ -336,7 +336,7 @@ int main(int argc, char* argv[])
 
     BenchmarkResult result;
     CompletionState completion;
-    scheduler->spawn(runBenchmark(scheduler, &options, &result, &completion));
+    scheduleTask(scheduler, runBenchmark(scheduler, &options, &result, &completion));
 
     {
         std::unique_lock<std::mutex> lock(completion.mutex);

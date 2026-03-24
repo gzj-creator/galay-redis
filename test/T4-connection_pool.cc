@@ -214,7 +214,8 @@ Coroutine testConcurrency(IOScheduler* scheduler)
 
     // 启动多个并发客户端
     for (int i = 0; i < kConcurrentClients; ++i) {
-        scheduler->spawn(testConcurrentAcquire(scheduler, i, pool, failure_count, remaining, done_waiter));
+        scheduleTask(scheduler,
+                     testConcurrentAcquire(scheduler, i, pool, failure_count, remaining, done_waiter));
     }
 
     auto all_done = co_await done_waiter->wait().timeout(std::chrono::seconds(10));
@@ -417,29 +418,12 @@ Coroutine testStatistics(IOScheduler* scheduler)
 
 Coroutine runAllConnectionPoolTests(IOScheduler* scheduler, std::promise<void>* all_done)
 {
-    auto t1 = testBasicConnectionPool(scheduler);
-    co_await spawn(t1);
-    co_await t1.wait();
-
-    auto t2 = testScopedConnection(scheduler);
-    co_await spawn(t2);
-    co_await t2.wait();
-
-    auto t3 = testConcurrency(scheduler);
-    co_await spawn(t3);
-    co_await t3.wait();
-
-    auto t4 = testPoolExpansion(scheduler);
-    co_await spawn(t4);
-    co_await t4.wait();
-
-    auto t5 = testHealthCheck(scheduler);
-    co_await spawn(t5);
-    co_await t5.wait();
-
-    auto t6 = testStatistics(scheduler);
-    co_await spawn(t6);
-    co_await t6.wait();
+    co_await testBasicConnectionPool(scheduler);
+    co_await testScopedConnection(scheduler);
+    co_await testConcurrency(scheduler);
+    co_await testPoolExpansion(scheduler);
+    co_await testHealthCheck(scheduler);
+    co_await testStatistics(scheduler);
 
     all_done->set_value();
 }
@@ -463,7 +447,7 @@ int main()
         std::promise<void> all_done_promise;
         auto all_done_future = all_done_promise.get_future();
 
-        scheduler->spawn(runAllConnectionPoolTests(scheduler, &all_done_promise));
+        scheduleTask(scheduler, runAllConnectionPoolTests(scheduler, &all_done_promise));
         auto wait_status = all_done_future.wait_for(std::chrono::seconds(90));
         if (wait_status != std::future_status::ready) {
             std::cerr << "Connection pool tests timed out" << std::endl;

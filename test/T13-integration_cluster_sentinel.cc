@@ -328,7 +328,7 @@ int main()
     }
     g_failures.store(0);
 
-    scheduler->spawn(runIntegration(scheduler, cfg));
+    scheduleTask(scheduler, runIntegration(scheduler, cfg));
 
     bool finished = false;
     {

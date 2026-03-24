@@ -172,7 +172,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
 
     const std::string ms_key = "example:ms:key";
     const std::string ms_value = "ms-ok";
-    auto ms_set = co_await ms_client.execute("SET", {ms_key, ms_value}).timeout(std::chrono::seconds(5));
+    auto ms_set = co_await ms_client.execute("SET", {ms_key, ms_value});
     if (!ms_set) {
         std::cerr << "Master write failed: " << ms_set.error().message() << std::endl;
         if (auto repl = ms_client.replica(0); repl.has_value()) {
@@ -186,7 +186,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
         co_return;
     }
 
-    auto ms_get = co_await ms_client.execute("GET", {ms_key}, true).timeout(std::chrono::seconds(5));
+    auto ms_get = co_await ms_client.execute("GET", {ms_key}, true);
     std::string ms_read_value;
     if (!readCommandSingleString(ms_get, ms_read_value) || ms_read_value != ms_value) {
         std::cerr << "Replica read value mismatch, got: " << ms_read_value << std::endl;
@@ -227,8 +227,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
     const std::string cluster_key = galay::redis::example::kDefaultTopologyKey;
     const std::string cluster_value = galay::redis::example::kDefaultTopologyValue;
 
-    auto cluster_set = co_await cluster_client.execute("SET", {cluster_key, cluster_value}, cluster_key)
-                           .timeout(std::chrono::seconds(5));
+    auto cluster_set = co_await cluster_client.execute("SET", {cluster_key, cluster_value}, cluster_key);
     if (!cluster_set || cluster_set.value().empty()) {
         std::cerr << "Cluster SET failed" << std::endl;
         if (auto node = cluster_client.node(0); node.has_value()) {
@@ -241,8 +240,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
         co_return;
     }
 
-    auto cluster_get = co_await cluster_client.execute("GET", {cluster_key}, cluster_key)
-                           .timeout(std::chrono::seconds(5));
+    auto cluster_get = co_await cluster_client.execute("GET", {cluster_key}, cluster_key);
     std::string cluster_read_value;
     if (!readCommandSingleString(cluster_get, cluster_read_value) || cluster_read_value != cluster_value) {
         std::cerr << "Cluster GET value mismatch" << std::endl;
@@ -297,7 +295,7 @@ int main(int argc, char* argv[])
     }
 
     DemoState state;
-    scheduler->spawn(runDemo(scheduler, &state, host, port));
+    scheduleTask(scheduler, runDemo(scheduler, &state, host, port));
 
     std::unique_lock<std::mutex> lock(state.mutex);
     const bool finished = state.cv.wait_for(lock, std::chrono::seconds(30), [&]() {

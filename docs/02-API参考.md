@@ -400,7 +400,7 @@
 
 ### Builder 类型
 
-`RedisTopologyClient.h` 还公开了两个 builder，它们和 `RedisClientBuilder` 一样按值累积 `AsyncRedisConfig`：
+`RedisTopologyClient.h` 公开了 TCP/TLS 两组 builder，它们都按值累积配置：
 
 - `RedisMasterSlaveClientBuilder`
   - `scheduler(IOScheduler*)`
@@ -417,6 +417,14 @@
   - `recvTimeout(std::chrono::milliseconds)`
   - `bufferSize(size_t)`
   - `buildConfig() const`
+  - `build()`
+- `RedissMasterSlaveClientBuilder`
+  - 在上面基础上增加 `tlsConfig(RedissClientConfig)`
+  - `buildTlsConfig() const`
+  - `build()`
+- `RedissClusterClientBuilder`
+  - 在上面基础上增加 `tlsConfig(RedissClientConfig)`
+  - `buildTlsConfig() const`
   - `build()`
 
 ### `RedisMasterSlaveClient`
@@ -454,12 +462,32 @@
 
 ### Awaitable 与内部边界
 
-#### `RedisCommandResultAwaitable`
+#### 拓扑方法现在返回 `Task<RedisCommandResult>`
 
 - 来源：`RedisMasterSlaveClient::execute(...)`、`RedisMasterSlaveClient::refreshFromSentinel()`、`RedisClusterClient::execute(...)`、`RedisClusterClient::refreshSlots()`
-- `await_resume()` 返回 `RedisCommandResult`，即 `std::expected<std::vector<RedisValue>, RedisError>`
-- 它本质上包了一层 `AsyncWaiter<RedisCommandResult>`，把后台协程产出的命令结果安全转交给调用侧
-- 若超时或 waiter 恢复阶段出现 `IOError`，当前实现会通过 `ioErrorToRedisError(...)` 转成 `RedisError`
+- 返回类型：`galay::kernel::Task<RedisCommandResult>`
+- `RedisCommandResult` 仍然是 `std::expected<std::vector<RedisValue>, RedisError>`
+- 调用方式直接写成 `auto result = co_await cluster.refreshSlots();`
+- 公开头文件里已经不再暴露 `RedisCommandResultAwaitable`
+
+### TLS 对应类型
+
+当库以 `GALAY_REDIS_ENABLE_SSL=ON` 构建时，`RedisClient.h` / `RedisConnectionPool.h` / `RedisTopologyClient.h` 还会公开以下 TLS facade：
+
+- `RedissClient`
+- `RedissClientBuilder`
+- `RedissClientConfig`
+- `RedissConnectionPool`
+- `RedissConnectionPoolConfig`
+- `RedissMasterSlaveClient`
+- `RedissClusterClient`
+
+最常用的 TLS 入口：
+
+- `RedissClient::connect("rediss://host:6380/0")`
+- `RedissClientBuilder::tlsConfig(...)`
+- `RedissMasterSlaveClientBuilder::tlsConfig(...)`
+- `RedissClusterClientBuilder::tlsConfig(...)`
 
 #### 内部但可见的类型
 
@@ -573,7 +601,7 @@
 - async 读取：`examples/include/E1-async_basic_demo.cc`
 - Pub/Sub 消息数组：`examples/include/E3-topology_pubsub_demo.cc`
 - 大小与行为验证：`test/T14-redis_value_size.cc`
-- RESP3 push / verbatim / big number / blob error / attribute：`test/T15-resp3_surface.cc`
+- awaitable / pool public surface：`test/T15-awaitable_surface.cc`
 
 ## `RedisSession`（同步 API，独立于当前 async 主路径）
 
@@ -633,10 +661,10 @@
 - async 基础命令：`examples/include/E1-async_basic_demo.cc`
 - batch / pipeline：`examples/include/E2-pipeline_demo.cc`
 - topology / pubsub：`examples/include/E3-topology_pubsub_demo.cc`
-- 测试入口：`test/T1-async.cc`、`test/T2-sync.cc`、`test/T15-resp3_surface.cc`
+- 测试入口：`test/T1-async.cc`、`test/T2-sync.cc`、`test/T15-awaitable_surface.cc`
 - async / sync 基础测试：`test/T1-async.cc`、`test/T2-sync.cc`
 - topology / single-flight：`test/T11-topology_and_pubsub.cc`、`test/T12-topology_singleflight.cc`
-- RESP3 surface：`test/T15-resp3_surface.cc`
+- awaitable / builder surface：`test/T15-awaitable_surface.cc`
 
 ## 不再作为当前 async API 文档入口的旧别名
 
