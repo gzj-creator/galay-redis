@@ -354,14 +354,14 @@ Coroutine benchmarkNormal(IOScheduler* scheduler, const BenchmarkOptions* option
         const std::array<std::string_view, 2> args{key, value};
         set_encoded.clear();
         set_encoded.reserve(encoder.estimateCommandBytes("SET", args));
-        encoder.append(set_encoded, "SET", args);
+        encoder.appendCommandFast(set_encoded, "SET", args);
         return RedisBorrowedCommand(set_encoded, 1);
     };
     auto encodeGet = [&](std::string_view key) -> RedisBorrowedCommand {
         const std::array<std::string_view, 1> args{key};
         get_encoded.clear();
         get_encoded.reserve(encoder.estimateCommandBytes("GET", args));
-        encoder.append(get_encoded, "GET", args);
+        encoder.appendCommandFast(get_encoded, "GET", args);
         return RedisBorrowedCommand(get_encoded, 1);
     };
 
