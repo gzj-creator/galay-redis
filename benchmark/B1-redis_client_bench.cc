@@ -326,7 +326,9 @@ void countBatchResult(
 Coroutine benchmarkNormal(IOScheduler* scheduler, const BenchmarkOptions* options, int client_id)
 {
     auto client = RedisClientBuilder().scheduler(scheduler).bufferSize(options->buffer_size).build();
-    RedisCommandBuilder command_builder;
+    protocol::RespEncoder encoder;
+    std::string set_encoded;
+    std::string get_encoded;
     std::int64_t local_success = 0;
     std::int64_t local_error = 0;
     std::int64_t local_timeout = 0;
@@ -348,6 +350,20 @@ Coroutine benchmarkNormal(IOScheduler* scheduler, const BenchmarkOptions* option
     }
 
     auto inputs = buildInputs("bench:normal", client_id, options->operations);
+    auto encodeSet = [&](std::string_view key, std::string_view value) -> RedisBorrowedCommand {
+        const std::array<std::string_view, 2> args{key, value};
+        set_encoded.clear();
+        set_encoded.reserve(encoder.estimateCommandBytes("SET", args));
+        encoder.append(set_encoded, "SET", args);
+        return RedisBorrowedCommand(set_encoded, 1);
+    };
+    auto encodeGet = [&](std::string_view key) -> RedisBorrowedCommand {
+        const std::array<std::string_view, 1> args{key};
+        get_encoded.clear();
+        get_encoded.reserve(encoder.estimateCommandBytes("GET", args));
+        encoder.append(get_encoded, "GET", args);
+        return RedisBorrowedCommand(get_encoded, 1);
+    };
 
     const auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < options->operations; ++i) {
@@ -355,22 +371,24 @@ Coroutine benchmarkNormal(IOScheduler* scheduler, const BenchmarkOptions* option
         const auto& value = inputs.values[static_cast<size_t>(i)];
 
         const auto set_begin = std::chrono::high_resolution_clock::now();
+        RedisBorrowedCommand set_packet = encodeSet(key, value);
         std::expected<std::optional<std::vector<RedisValue>>, RedisError> set_result;
         if (options->timeout_ms >= 0) {
-            set_result = co_await client.command(command_builder.set(key, value)).timeout(request_timeout);
+            set_result = co_await client.commandBorrowed(set_packet).timeout(request_timeout);
         } else {
-            set_result = co_await client.command(command_builder.set(key, value));
+            set_result = co_await client.commandBorrowed(set_packet);
         }
         const auto set_end = std::chrono::high_resolution_clock::now();
         local_latencies.push_back(std::chrono::duration_cast<std::chrono::microseconds>(set_end - set_begin).count());
         countSingleResult(set_result, local_success, local_error, local_timeout);
 
         const auto get_begin = std::chrono::high_resolution_clock::now();
+        RedisBorrowedCommand get_packet = encodeGet(key);
         std::expected<std::optional<std::vector<RedisValue>>, RedisError> get_result;
         if (options->timeout_ms >= 0) {
-            get_result = co_await client.command(command_builder.get(key)).timeout(request_timeout);
+            get_result = co_await client.commandBorrowed(get_packet).timeout(request_timeout);
         } else {
-            get_result = co_await client.command(command_builder.get(key));
+            get_result = co_await client.commandBorrowed(get_packet);
         }
         const auto get_end = std::chrono::high_resolution_clock::now();
         local_latencies.push_back(std::chrono::duration_cast<std::chrono::microseconds>(get_end - get_begin).count());
