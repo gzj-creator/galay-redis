@@ -182,7 +182,25 @@ namespace galay::redis
     {
         if (recv_only) {
             encoded_cmd.clear();
+        } else {
+            encoded_view = encoded_cmd;
         }
+        values.reserve(expected_replies);
+        if (expected_replies == 0) {
+            result = std::optional<std::vector<RedisValue>>(std::vector<RedisValue>{});
+            phase = RedisExchangeSharedState::Phase::Done;
+        }
+    }
+
+    detail::RedisExchangeSharedState::RedisExchangeSharedState(RedisClient& client,
+                                                               std::string_view encoded_command_in,
+                                                               size_t expected_replies_in,
+                                                               bool recv_only_in)
+        : client(&client)
+        , encoded_view(recv_only_in ? std::string_view{} : encoded_command_in)
+        , expected_replies(expected_replies_in)
+        , recv_only(recv_only_in)
+    {
         values.reserve(expected_replies);
         if (expected_replies == 0) {
             result = std::optional<std::vector<RedisValue>>(std::vector<RedisValue>{});
@@ -219,6 +237,7 @@ namespace galay::redis
                 encoder.appendCommandFast(encoded_cmd, cmd_view.command, cmd_view.args);
             }
         }
+        encoded_view = encoded_cmd;
     }
 
     detail::RedisExchangeMachine::RedisExchangeMachine(std::shared_ptr<RedisExchangeSharedState> state)
@@ -297,18 +316,18 @@ namespace galay::redis
                 m_state->phase = RedisExchangeSharedState::Phase::Done;
                 return galay::kernel::MachineAction<result_type>::continue_();
             }
-            m_state->phase = (m_state->recv_only || m_state->encoded_cmd.empty())
+            m_state->phase = (m_state->recv_only || m_state->encoded_view.empty())
                 ? RedisExchangeSharedState::Phase::Parse
                 : RedisExchangeSharedState::Phase::Send;
             return galay::kernel::MachineAction<result_type>::continue_();
         case RedisExchangeSharedState::Phase::Send:
-            if (m_state->sent >= m_state->encoded_cmd.size()) {
+            if (m_state->sent >= m_state->encoded_view.size()) {
                 m_state->phase = RedisExchangeSharedState::Phase::Parse;
                 return galay::kernel::MachineAction<result_type>::continue_();
             }
             return galay::kernel::MachineAction<result_type>::waitWrite(
-                m_state->encoded_cmd.data() + m_state->sent,
-                m_state->encoded_cmd.size() - m_state->sent);
+                m_state->encoded_view.data() + m_state->sent,
+                m_state->encoded_view.size() - m_state->sent);
         case RedisExchangeSharedState::Phase::Parse: {
             auto parsed = tryParseReplies();
             if (!parsed.has_value()) {
@@ -375,7 +394,7 @@ namespace galay::redis
         }
 
         m_state->sent += result.value();
-        if (m_state->sent >= m_state->encoded_cmd.size()) {
+        if (m_state->sent >= m_state->encoded_view.size()) {
             m_state->phase = RedisExchangeSharedState::Phase::Parse;
         }
     }
@@ -681,6 +700,19 @@ namespace galay::redis
             .build();
     }
 
+    RedisExchangeOperation RedisClient::commandBorrowed(RedisBorrowedCommand packet)
+    {
+        auto state = std::make_shared<detail::RedisExchangeSharedState>(
+            *this,
+            packet.encoded,
+            packet.expected_replies,
+            false);
+        return galay::kernel::AwaitableBuilder<detail::RedisExchangeResult>::fromStateMachine(
+                   m_socket.controller(),
+                   detail::RedisExchangeMachine(std::move(state)))
+            .build();
+    }
+
     RedisExchangeOperation RedisClient::receive(size_t expected_replies)
     {
         auto state = std::make_shared<detail::RedisExchangeSharedState>(
@@ -697,6 +729,20 @@ namespace galay::redis
     RedisExchangeOperation RedisClient::batch(std::span<const RedisCommandView> commands)
     {
         auto state = std::make_shared<detail::RedisExchangeSharedState>(*this, commands);
+        return galay::kernel::AwaitableBuilder<detail::RedisExchangeResult>::fromStateMachine(
+                   m_socket.controller(),
+                   detail::RedisExchangeMachine(std::move(state)))
+            .build();
+    }
+
+    RedisExchangeOperation RedisClient::batchBorrowed(std::string_view encoded,
+                                                      size_t expected_replies)
+    {
+        auto state = std::make_shared<detail::RedisExchangeSharedState>(
+            *this,
+            encoded,
+            expected_replies,
+            false);
         return galay::kernel::AwaitableBuilder<detail::RedisExchangeResult>::fromStateMachine(
                    m_socket.controller(),
                    detail::RedisExchangeMachine(std::move(state)))
