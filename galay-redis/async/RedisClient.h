@@ -46,13 +46,28 @@ namespace galay::redis
     using RedisResult = std::expected<std::vector<RedisValue>, RedisError>;
     using RedisVoidResult = std::expected<void, RedisError>;
 
-    struct RedisBorrowedCommand
+    class RedisBorrowedCommand
     {
+    public:
         // Internal fast-path packet for trusted callers.
         // encoded must outlive the entire co_await of commandBorrowed/batchBorrowed.
-        // Passing temporaries (e.g. from function-local rvalues) is unsafe.
-        std::string_view encoded;
-        size_t expected_replies = 1;
+        // Passing temporaries is forbidden at compile-time where possible.
+        explicit RedisBorrowedCommand(const std::string& encoded,
+                                      size_t expected_replies = 1) noexcept
+            : m_encoded(encoded)
+            , m_expected_replies(expected_replies)
+        {
+        }
+
+        RedisBorrowedCommand(std::string&&, size_t = 1) = delete;
+        RedisBorrowedCommand(std::string_view, size_t = 1) = delete;
+
+        [[nodiscard]] std::string_view encoded() const noexcept { return m_encoded; }
+        [[nodiscard]] size_t expectedReplies() const noexcept { return m_expected_replies; }
+
+    private:
+        std::string_view m_encoded;
+        size_t m_expected_replies = 1;
     };
 
     struct RedisConnectOptions
@@ -589,8 +604,9 @@ namespace galay::redis
 
         RedisExchangeOperation command(RedisEncodedCommand command_packet);
         // Internal plain fast path: zero-copy send from caller-owned bytes.
-        // Caller must keep packet.encoded alive until await completion.
-        RedisExchangeOperation commandBorrowed(RedisBorrowedCommand packet);
+        // packet must outlive the awaited operation and must not be a temporary.
+        RedisExchangeOperation commandBorrowed(const RedisBorrowedCommand& packet);
+        RedisExchangeOperation commandBorrowed(RedisBorrowedCommand&& packet) = delete;
         RedisExchangeOperation receive(size_t expected_replies = 1);
 
         // ======================== Pipeline批量操作 ========================
@@ -598,7 +614,9 @@ namespace galay::redis
         RedisExchangeOperation batch(std::span<const RedisCommandView> commands);
         // Internal plain fast path for pre-encoded pipeline payloads.
         // encoded must remain valid until the awaited exchange completes.
+        RedisExchangeOperation batchBorrowed(const std::string& encoded, size_t expected_replies);
         RedisExchangeOperation batchBorrowed(std::string_view encoded, size_t expected_replies);
+        RedisExchangeOperation batchBorrowed(std::string&& encoded, size_t expected_replies) = delete;
 
         // ======================== 连接管理 ========================
 

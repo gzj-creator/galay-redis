@@ -700,12 +700,12 @@ namespace galay::redis
             .build();
     }
 
-    RedisExchangeOperation RedisClient::commandBorrowed(RedisBorrowedCommand packet)
+    RedisExchangeOperation RedisClient::commandBorrowed(const RedisBorrowedCommand& packet)
     {
         auto state = std::make_shared<detail::RedisExchangeSharedState>(
             *this,
-            packet.encoded,
-            packet.expected_replies,
+            packet.encoded(),
+            packet.expectedReplies(),
             false);
         return galay::kernel::AwaitableBuilder<detail::RedisExchangeResult>::fromStateMachine(
                    m_socket.controller(),
@@ -733,6 +733,12 @@ namespace galay::redis
                    m_socket.controller(),
                    detail::RedisExchangeMachine(std::move(state)))
             .build();
+    }
+
+    RedisExchangeOperation RedisClient::batchBorrowed(const std::string& encoded,
+                                                      size_t expected_replies)
+    {
+        return batchBorrowed(std::string_view(encoded), expected_replies);
     }
 
     RedisExchangeOperation RedisClient::batchBorrowed(std::string_view encoded,

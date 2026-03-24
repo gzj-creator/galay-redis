@@ -50,7 +50,8 @@ Task<void> runBorrowedCommandSmoke(IOScheduler* scheduler, TestState* state)
     set_encoded.clear();
     set_encoded.reserve(encoder.estimateCommandBytes("SET", set_args));
     encoder.append(set_encoded, "SET", set_args);
-    auto set_result = co_await client.commandBorrowed({set_encoded, 1}).timeout(5s);
+    RedisBorrowedCommand set_packet(set_encoded, 1);
+    auto set_result = co_await client.commandBorrowed(set_packet).timeout(5s);
     if (!set_result || !set_result.value() || set_result.value()->empty()) {
         finish(*state, false, "borrowed SET failed");
         co_return;
@@ -65,7 +66,8 @@ Task<void> runBorrowedCommandSmoke(IOScheduler* scheduler, TestState* state)
     get_encoded.clear();
     get_encoded.reserve(encoder.estimateCommandBytes("GET", get_args));
     encoder.append(get_encoded, "GET", get_args);
-    auto get_result = co_await client.commandBorrowed({get_encoded, 1}).timeout(5s);
+    RedisBorrowedCommand get_packet(get_encoded, 1);
+    auto get_result = co_await client.commandBorrowed(get_packet).timeout(5s);
     if (!get_result || !get_result.value() || get_result.value()->empty()) {
         finish(*state, false, "borrowed GET failed");
         co_return;
