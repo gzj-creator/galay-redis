@@ -456,9 +456,9 @@ Coroutine benchmarkPipeline(IOScheduler* scheduler, const BenchmarkOptions* opti
             builder.append("SET", std::array<std::string_view, 2>{key, value});
         }
         if (options->timeout_ms >= 0) {
-            pipeline_result = co_await client.batch(builder.commands()).timeout(request_timeout);
+            pipeline_result = co_await client.batchBorrowed(builder.encoded(), builder.size()).timeout(request_timeout);
         } else {
-            pipeline_result = co_await client.batch(builder.commands());
+            pipeline_result = co_await client.batchBorrowed(builder.encoded(), builder.size());
         }
         const auto call_end = std::chrono::high_resolution_clock::now();
         local_latencies.push_back(std::chrono::duration_cast<std::chrono::microseconds>(call_end - call_begin).count());
