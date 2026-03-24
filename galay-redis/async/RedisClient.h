@@ -46,6 +46,12 @@ namespace galay::redis
     using RedisResult = std::expected<std::vector<RedisValue>, RedisError>;
     using RedisVoidResult = std::expected<void, RedisError>;
 
+    struct RedisBorrowedCommand
+    {
+        std::string_view encoded;
+        size_t expected_replies = 1;
+    };
+
     struct RedisConnectOptions
     {
         std::string username;
@@ -574,11 +580,13 @@ namespace galay::redis
         // ======================== 命令执行 ========================
 
         RedisExchangeOperation command(RedisEncodedCommand command_packet);
+        RedisExchangeOperation commandBorrowed(RedisBorrowedCommand packet);
         RedisExchangeOperation receive(size_t expected_replies = 1);
 
         // ======================== Pipeline批量操作 ========================
 
         RedisExchangeOperation batch(std::span<const RedisCommandView> commands);
+        RedisExchangeOperation batchBorrowed(std::string_view encoded, size_t expected_replies);
 
         // ======================== 连接管理 ========================
 
