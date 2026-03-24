@@ -738,15 +738,9 @@ namespace galay::redis
     RedisExchangeOperation RedisClient::batchBorrowed(const std::string& encoded,
                                                       size_t expected_replies)
     {
-        return batchBorrowed(std::string_view(encoded), expected_replies);
-    }
-
-    RedisExchangeOperation RedisClient::batchBorrowed(std::string_view encoded,
-                                                      size_t expected_replies)
-    {
         auto state = std::make_shared<detail::RedisExchangeSharedState>(
             *this,
-            encoded,
+            std::string_view(encoded),
             expected_replies,
             false);
         return galay::kernel::AwaitableBuilder<detail::RedisExchangeResult>::fromStateMachine(

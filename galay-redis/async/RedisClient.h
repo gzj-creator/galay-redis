@@ -615,7 +615,6 @@ namespace galay::redis
         // Internal plain fast path for pre-encoded pipeline payloads.
         // encoded must remain valid until the awaited exchange completes.
         RedisExchangeOperation batchBorrowed(const std::string& encoded, size_t expected_replies);
-        RedisExchangeOperation batchBorrowed(std::string_view encoded, size_t expected_replies);
         RedisExchangeOperation batchBorrowed(std::string&& encoded, size_t expected_replies) = delete;
 
         // ======================== 连接管理 ========================
