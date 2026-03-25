@@ -514,49 +514,12 @@ namespace galay::redis
 #else
     namespace detail
     {
-        class RedissExchangeOperation : public galay::kernel::TimeoutSupport<RedissExchangeOperation>
-        {
-        public:
-            using Result = std::expected<std::optional<std::vector<RedisValue>>, RedisError>;
-
-            RedissExchangeOperation();
-            explicit RedissExchangeOperation(Result ready_result);
-
-            bool await_ready() { return true; }
-            template <typename Promise>
-            bool await_suspend(std::coroutine_handle<Promise>)
-            {
-                return false;
-            }
-            Result await_resume() { return std::move(m_ready_result); }
-            void markTimeout();
-
-        private:
-            Result m_ready_result = std::unexpected(RedisError(
-                RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
-                "galay-redis was built without SSL support"));
-        };
-
-        class RedissConnectOperation : public galay::kernel::TimeoutSupport<RedissConnectOperation>
-        {
-        public:
-            RedissConnectOperation();
-            explicit RedissConnectOperation(RedisVoidResult ready_result);
-
-            bool await_ready() { return true; }
-            template <typename Promise>
-            bool await_suspend(std::coroutine_handle<Promise>)
-            {
-                return false;
-            }
-            RedisVoidResult await_resume() { return std::move(m_ready_result); }
-            void markTimeout();
-
-        private:
-            RedisVoidResult m_ready_result = std::unexpected(RedisError(
-                RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
-                "galay-redis was built without SSL support"));
-        };
+        using RedissCommandResult =
+            std::expected<std::optional<std::vector<RedisValue>>, RedisError>;
+        using RedissExchangeOperation =
+            galay::kernel::ReadyAwaitable<RedissCommandResult>;
+        using RedissConnectOperation =
+            galay::kernel::ReadyAwaitable<RedisVoidResult>;
     } // namespace detail
 #endif
 

@@ -515,36 +515,7 @@ namespace galay::redis
 #endif
     } // namespace detail
 
-#ifndef GALAY_REDIS_SSL_ENABLED
-    namespace detail
-    {
-        RedissExchangeOperation::RedissExchangeOperation() = default;
-        RedissExchangeOperation::RedissExchangeOperation(Result ready_result)
-            : m_ready_result(std::move(ready_result))
-        {
-        }
-
-        void RedissExchangeOperation::markTimeout()
-        {
-            m_ready_result = std::unexpected(RedisError(
-                RedisErrorType::REDIS_ERROR_TYPE_TIMEOUT_ERROR,
-                "Rediss operation timeout"));
-        }
-
-        RedissConnectOperation::RedissConnectOperation() = default;
-        RedissConnectOperation::RedissConnectOperation(RedisVoidResult ready_result)
-            : m_ready_result(std::move(ready_result))
-        {
-        }
-
-        void RedissConnectOperation::markTimeout()
-        {
-            m_ready_result = std::unexpected(RedisError(
-                RedisErrorType::REDIS_ERROR_TYPE_TIMEOUT_ERROR,
-                "Rediss connect timeout"));
-        }
-    } // namespace detail
-#else
+#ifdef GALAY_REDIS_SSL_ENABLED
     namespace detail
     {
         RedissExchangeSharedState::RedissExchangeSharedState(RedissClientImpl* impl_in,
@@ -1170,9 +1141,10 @@ namespace galay::redis
             .build();
 #else
         (void)url;
-        return detail::RedissConnectOperation(std::unexpected(RedisError(
-            RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
-            "galay-redis was built without SSL support")));
+        return galay::kernel::AwaitableBuilder<RedisVoidResult>::ready(
+            std::unexpected(RedisError(
+                RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
+                "galay-redis was built without SSL support")));
 #endif
     }
 
@@ -1214,9 +1186,10 @@ namespace galay::redis
         (void)ip;
         (void)port;
         (void)options;
-        return detail::RedissConnectOperation(std::unexpected(RedisError(
-            RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
-            "galay-redis was built without SSL support")));
+        return galay::kernel::AwaitableBuilder<RedisVoidResult>::ready(
+            std::unexpected(RedisError(
+                RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
+                "galay-redis was built without SSL support")));
 #endif
     }
 
@@ -1258,9 +1231,10 @@ namespace galay::redis
             .build();
 #else
         (void)command_packet;
-        return detail::RedissExchangeOperation(std::unexpected(RedisError(
-            RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
-            "galay-redis was built without SSL support")));
+        return galay::kernel::AwaitableBuilder<detail::RedissCommandResult>::ready(
+            std::unexpected(RedisError(
+                RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
+                "galay-redis was built without SSL support")));
 #endif
     }
 
@@ -1302,9 +1276,10 @@ namespace galay::redis
             .build();
 #else
         (void)expected_replies;
-        return detail::RedissExchangeOperation(std::unexpected(RedisError(
-            RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
-            "galay-redis was built without SSL support")));
+        return galay::kernel::AwaitableBuilder<detail::RedissCommandResult>::ready(
+            std::unexpected(RedisError(
+                RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
+                "galay-redis was built without SSL support")));
 #endif
     }
 
@@ -1346,9 +1321,10 @@ namespace galay::redis
             .build();
 #else
         (void)commands;
-        return detail::RedissExchangeOperation(std::unexpected(RedisError(
-            RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
-            "galay-redis was built without SSL support")));
+        return galay::kernel::AwaitableBuilder<detail::RedissCommandResult>::ready(
+            std::unexpected(RedisError(
+                RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
+                "galay-redis was built without SSL support")));
 #endif
     }
 
