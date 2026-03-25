@@ -2,6 +2,7 @@ find_package(galay-kernel REQUIRED)
 find_package(galay-utils REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(spdlog REQUIRED)
+include(CMakePackageConfigHelpers)
 
 if(GALAY_REDIS_ENABLE_SSL)
     find_package(galay-ssl REQUIRED)
@@ -121,14 +122,21 @@ if(GALAY_REDIS_ENABLE_SSL)
     )
 endif()
 
-target_include_directories(${PROJECT_NAME} PUBLIC ${OPENSSL_INCLUDE_DIR})
-target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_SOURCE_DIR})
+target_include_directories(${PROJECT_NAME}
+    PUBLIC
+        ${OPENSSL_INCLUDE_DIR}
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+        $<INSTALL_INTERFACE:include>
+        $<INSTALL_INTERFACE:include/galay-redis>
+)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
         CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
+        VERSION ${PROJECT_VERSION}
+        SOVERSION ${PROJECT_VERSION_MAJOR}
 )
 
 if(GALAY_REDIS_IMPORT_COMPILATION_ENABLED AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
@@ -138,6 +146,8 @@ if(GALAY_REDIS_IMPORT_COMPILATION_ENABLED AND CMAKE_VERSION VERSION_GREATER_EQUA
         CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
+        VERSION ${PROJECT_VERSION}
+        SOVERSION ${PROJECT_VERSION_MAJOR}
     )
     target_sources(${PROJECT_NAME}-modules
         PUBLIC
@@ -188,4 +198,37 @@ if(GALAY_REDIS_INSTALL_MODULE_INTERFACE AND NOT GALAY_REDIS_IMPORT_COMPILATION_E
             DESTINATION include/galay-redis/module
         )
     endif()
+endif()
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/galay-redis-config-version.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+configure_package_config_file(
+    "${CMAKE_SOURCE_DIR}/galay-redis-config.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/galay-redis-config.cmake"
+    INSTALL_DESTINATION lib/cmake/galay-redis
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/galay-redis-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/galay-redis-config-version.cmake"
+    DESTINATION lib/cmake/galay-redis
+)
+
+if(CMAKE_CONFIGURATION_TYPES)
+    install(EXPORT galay-redis-targets
+        FILE galay-redis-targets.cmake
+        NAMESPACE galay-redis::
+        DESTINATION lib/cmake/galay-redis
+    )
+else()
+    install(EXPORT galay-redis-targets
+        FILE galay-redis-targets.cmake
+        NAMESPACE galay-redis::
+        DESTINATION lib/cmake/galay-redis
+        CONFIGURATIONS ${CMAKE_BUILD_TYPE}
+    )
 endif()

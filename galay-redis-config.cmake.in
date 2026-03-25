@@ -1,0 +1,17 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(galay-kernel REQUIRED)
+find_dependency(galay-utils REQUIRED)
+find_dependency(OpenSSL REQUIRED)
+find_dependency(spdlog REQUIRED)
+
+set(GALAY_REDIS_ENABLE_SSL @GALAY_REDIS_ENABLE_SSL@)
+if(GALAY_REDIS_ENABLE_SSL)
+    find_dependency(galay-ssl REQUIRED)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/galay-redis-targets.cmake")
+
+check_required_components(galay-redis)

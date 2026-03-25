@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(galay-redis)
+project(galay-redis VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON)
 
