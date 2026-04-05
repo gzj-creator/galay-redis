@@ -1,11 +1,11 @@
-find_package(galay-kernel REQUIRED)
-find_package(galay-utils REQUIRED)
+find_package(galay-kernel 3.4.4 CONFIG REQUIRED)
+find_package(galay-utils CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(spdlog REQUIRED)
 include(CMakePackageConfigHelpers)
 
 if(GALAY_REDIS_ENABLE_SSL)
-    find_package(galay-ssl REQUIRED)
+    find_package(galay-ssl CONFIG REQUIRED)
 
     if(NOT TARGET galay-ssl::galay-ssl)
         message(FATAL_ERROR "galay-ssl::galay-ssl target not found. Please install galay-ssl or disable GALAY_REDIS_ENABLE_SSL.")
@@ -82,8 +82,6 @@ elseif(GALAY_REDIS_ENABLE_IMPORT_COMPILATION AND NOT GALAY_REDIS_IMPORT_BUILD_AV
                    "Reason: ${GALAY_REDIS_IMPORT_UNAVAILABLE_REASON}.")
 endif()
 
-include_directories(${OPENSSL_INCLUDE_DIR})
-
 file(GLOB SOURCES "base/*.cc" "async/*.cc" "protocol/*.cc")
 
 if(NOT TARGET galay-kernel::galay-kernel)
@@ -97,20 +95,15 @@ endif()
 add_library(${PROJECT_NAME} SHARED ${SOURCES})
 set_property(TARGET ${PROJECT_NAME} PROPERTY NO_SYSTEM_FROM_IMPORTED ON)
 
-get_target_property(GALAY_REDIS_KERNEL_INCLUDE_DIRS galay-kernel::galay-kernel INTERFACE_INCLUDE_DIRECTORIES)
-if(GALAY_REDIS_KERNEL_INCLUDE_DIRS)
-    foreach(GALAY_REDIS_KERNEL_INCLUDE_DIR ${GALAY_REDIS_KERNEL_INCLUDE_DIRS})
-        target_compile_options(${PROJECT_NAME} BEFORE PUBLIC "-I${GALAY_REDIS_KERNEL_INCLUDE_DIR}")
-    endforeach()
-    target_include_directories(${PROJECT_NAME} BEFORE PUBLIC ${GALAY_REDIS_KERNEL_INCLUDE_DIRS})
-endif()
-
 # 链接 galay-kernel 和 galay-utils 库
 target_link_libraries(${PROJECT_NAME}
-    PUBLIC galay-kernel::galay-kernel
-    PUBLIC galay::galay-utils
-    PUBLIC OpenSSL::SSL    # 使用OpenSSL目标
-    PUBLIC OpenSSL::Crypto # 使用OpenSSL目标
+    PUBLIC
+        galay-kernel::galay-kernel
+        spdlog::spdlog
+    PRIVATE
+        galay::galay-utils
+        OpenSSL::SSL
+        OpenSSL::Crypto
 )
 
 if(GALAY_REDIS_ENABLE_SSL)
@@ -123,12 +116,11 @@ if(GALAY_REDIS_ENABLE_SSL)
 endif()
 
 target_include_directories(${PROJECT_NAME}
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC
-        ${OPENSSL_INCLUDE_DIR}
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
         $<INSTALL_INTERFACE:include>
-        $<INSTALL_INTERFACE:include/galay-redis>
 )
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
@@ -178,18 +170,22 @@ if(TARGET ${PROJECT_NAME}-modules AND GALAY_REDIS_INSTALL_MODULE_INTERFACE)
     )
 endif()
 
-# 安装 galay-http 目录下的头文件
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
-    DESTINATION include/galay-redis
-    FILES_MATCHING 
-    PATTERN "*.h"
-    PATTERN "*.hpp"
-    PATTERN "*.inl"
-    PATTERN "build" EXCLUDE
-    PATTERN "CMakeFiles" EXCLUDE
-    PATTERN "*.cc" EXCLUDE
-    PATTERN "*.cmake" EXCLUDE
+export(
+    EXPORT galay-redis-targets
+    FILE "${CMAKE_CURRENT_BINARY_DIR}/galay-redis-targets-build.cmake"
+    NAMESPACE galay-redis::
 )
+
+# 安装公开头文件，显式排除遗留 sync/ 表面
+foreach(GALAY_REDIS_PUBLIC_SUBDIR async base protocol module)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/${GALAY_REDIS_PUBLIC_SUBDIR}/
+        DESTINATION include/galay-redis/${GALAY_REDIS_PUBLIC_SUBDIR}
+        FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.hpp"
+        PATTERN "*.inl"
+    )
+endforeach()
 
 if(GALAY_REDIS_INSTALL_MODULE_INTERFACE AND NOT GALAY_REDIS_IMPORT_COMPILATION_ENABLED)
     file(GLOB GALAY_REDIS_MODULE_INTERFACE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/module/*.cppm")

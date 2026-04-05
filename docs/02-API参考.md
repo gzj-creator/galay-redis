@@ -10,16 +10,16 @@
 | 安装后导入目标 | `galay-redis::galay-redis` | `find_package(galay-redis CONFIG REQUIRED)` 后可直接链接 |
 | 可选模块目标 | `galay-redis-modules` / `galay-redis::galay-redis-modules` | 只有满足模块工具链条件时才生成/导出 |
 | C++23 模块名 | `galay.redis` | 模块接口文件：`galay-redis/module/galay.redis.cppm` |
-| 安装头目录 | `include/galay-redis` | `galay-redis/CMakeLists.txt` 会安装 `galay-redis/` 下全部 `.h` / `.hpp` / `.inl` |
+| 安装头目录 | `include/galay-redis` | `galay-redis/CMakeLists.txt` 会安装公开 `.h` / `.hpp` / `.inl`，并排除 `sync/` 遗留目录 |
 | 条件安装模块目录 | `include/galay-redis/module` | `GALAY_REDIS_INSTALL_MODULE_INTERFACE=ON` 时安装 `.cppm` 接口文件 |
 
 与公开表面直接相关的事实：
 
-- `install(DIRECTORY ...)` 会安装当前仓库里的全部公开 `.h` / `.hpp` / `.inl`，而不只是一小部分 async 入口
+- `install(DIRECTORY ...)` 会安装当前仓库里的公开 `.h` / `.hpp` / `.inl`，但会显式排除 `sync/` 遗留目录
 - `galay.redis` 显式导出了 `RedisBase.h`、`RedisConfig.h`、`RedisError.h`、`RedisValue.h`、`RedisProtocol.h`、`Connection.h`、`AsyncRedisConfig.h`、`RedisClient.h`、`RedisConnectionPool.h`、`RedisTopologyClient.h`
 - `protocol/Builder.h`、`async/RedisBufferProvider.h`、`base/RedisLog.h` 会经由 `RedisClient.h` 被模块用户间接看到
 - `module/ModulePrelude.hpp` 会随头文件一起安装，因为 `module/galay.redis.cppm` 在 global module fragment 中直接 `#include` 它
-- `sync/RedisSession.h` 与 `sync/RedisSession.inl` 都是安装公开文件，但当前不在 `galay.redis` 模块接口里
+- `sync/RedisSession.*` 仍存在于源码树中供遗留同步路径与回归测试使用，但不再进入安装/模块公开合同
 - `module/galay.redis.cppm` 在模块编译开启时经 `FILE_SET CXX_MODULES` 安装；模块编译关闭但 `GALAY_REDIS_INSTALL_MODULE_INTERFACE=ON` 时，仍会直接安装源码里的 `.cppm`
 
 ## 头文件与模块可见性总览
@@ -39,12 +39,11 @@
 | `galay-redis/async/RedisClient.h` | `RedisConnectOptions`、`RedisClientBuilder`、`RedisClient` | 显式导出 | 单连接 async 主入口 |
 | `galay-redis/async/RedisConnectionPool.h` | `ConnectionPoolConfig`、`PooledConnection`、`RedisConnectionPool`、`ScopedConnection` | 显式导出 | 连接池 |
 | `galay-redis/async/RedisTopologyClient.h` | `RedisNodeAddress`、`RedisClusterNodeAddress`、`RedisMasterSlaveClientBuilder`、`RedisMasterSlaveClient`、`RedisClusterClientBuilder`、`RedisClusterClient` | 显式导出 | 主从 / Sentinel / Cluster |
-| `galay-redis/sync/RedisSession.h` | `RedisSession` | 仅安装头 | 同步阻塞 API |
+| `galay-redis/sync/RedisSession.h` | `RedisSession` | 源码树遗留，仅本地回归使用 | 不安装、不导出到模块 |
 
 ## 已安装但不导出新类型的文件
 
 - `galay-redis/module/ModulePrelude.hpp`：模块构建用的预包含头，本身不声明业务 API，但会作为安装产物出现在 `include/galay-redis/module`
-- `galay-redis/sync/RedisSession.inl`：`RedisSession` 模板实现体，作为安装产物与 `RedisSession.h` 成对出现
 
 ## `RedisBase.h`
 
@@ -626,11 +625,11 @@ TLS 单连接路径当前返回的 operation 类型是：
 - 大小与行为验证：`test/T14-redis_value_size.cc`
 - awaitable / pool public surface：`test/T15-awaitable_surface.cc`
 
-## `RedisSession`（同步 API，独立于当前 async 主路径）
+## `RedisSession`（源码树遗留同步 API，不属于安装公开合同）
 
 头文件：`galay-redis/sync/RedisSession.h`
 
-这是仓库里仍然公开的同步阻塞接口，公开方法包括：
+这是仓库源码树里仍保留的同步阻塞接口，当前主要用于维护遗留实现和 `test/T2-sync.cc` 这类源码树回归。公开方法包括：
 
 - `connect(...)` / `disconnect()`
 - `selectDB()` / `flushDB()` / `switchVersion()`
@@ -643,9 +642,11 @@ TLS 单连接路径当前返回的 operation 类型是：
 
 但要注意：
 
+- 当前安装规则会排除 `sync/`，因此 `find_package(galay-redis)` 消费方不会拿到这组头文件
 - 当前 `examples/`、`benchmark/` 没有覆盖这条同步路径
 - 当前主 README 和快速开始不再把它当作默认入口
-- 如果你需要同步 API，请先把它视为与 async 文档流隔离的独立表面
+- 模块 `galay.redis` 也不会导出这条同步路径
+- 如果你仍需要同步 API，请把它视为源码树内部兼容表面，而不是安装消费方的稳定入口
 
 ## 模块接口
 
@@ -661,7 +662,7 @@ TLS 单连接路径当前返回的 operation 类型是：
 
 - 显式模块导出：`RedisBase.h`、`RedisConfig.h`、`RedisError.h`、`RedisValue.h`、`RedisProtocol.h`、`Connection.h`、`AsyncRedisConfig.h`、`RedisClient.h`、`RedisConnectionPool.h`、`RedisTopologyClient.h`
 - 通过 `RedisClient.h` 间接可见：`RedisLog.h`、`Builder.h`、`RedisBufferProvider.h`
-- 不在模块里：`sync/RedisSession.h`
+- 不在模块/安装合同里：`sync/RedisSession.h`
 
 ## 统一返回、生命周期与交叉验证语义
 
@@ -675,7 +676,7 @@ TLS 单连接路径当前返回的 operation 类型是：
 
 - 当前 async 主路径本质上是协程友好 API，真实协程调用方式见 `examples/include/E1-async_basic_demo.cc`
 - 失败语义统一回到 `RedisError`、`RedisValue` / `RedisAsyncValue` 与对应返回签名，不应把 RESP2 / RESP3 文本内容当成唯一错误判据
-- `RedisSession` 是独立的同步阻塞表面，不是当前 async 主路径的“简写”
+- `RedisSession` 是源码树遗留的同步阻塞表面，不是当前 async 主路径的“简写”，也不是安装消费方的默认入口
 - `RedisValue` / `RedisAsyncValue` 是当前统一结果容器；RESP2 / RESP3 的细节都应回到这里确认
 - 连接池、拓扑客户端、单连接客户端都是状态型对象；检索调用细节时，应把 builder/config、client、value 三层分开理解
 
@@ -684,7 +685,7 @@ TLS 单连接路径当前返回的 operation 类型是：
 - async 基础命令：`examples/include/E1-async_basic_demo.cc`
 - batch / pipeline：`examples/include/E2-pipeline_demo.cc`
 - topology / pubsub：`examples/include/E3-topology_pubsub_demo.cc`
-- 测试入口：`test/T1-async.cc`、`test/T2-sync.cc`、`test/T15-awaitable_surface.cc`
+- 测试入口：`test/T1-async.cc`、`test/T2-sync.cc`（源码树遗留同步回归）、`test/T15-awaitable_surface.cc`
 - async / sync 基础测试：`test/T1-async.cc`、`test/T2-sync.cc`
 - topology / single-flight：`test/T11-topology_and_pubsub.cc`、`test/T12-topology_singleflight.cc`
 - awaitable / builder surface：`test/T15-awaitable_surface.cc`

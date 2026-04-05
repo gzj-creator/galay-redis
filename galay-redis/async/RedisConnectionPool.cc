@@ -8,7 +8,7 @@ namespace galay::redis
 
     PoolInitializeAwaitable::PoolInitializeAwaitable(RedisConnectionPool& pool)
         : m_flow(std::make_unique<Flow>(pool))
-        , m_inner(galay::kernel::AwaitableBuilder<Result, 4, Flow>(&pool.m_builder_controller, *m_flow)
+        , m_inner(galay::kernel::AwaitableBuilder<Result, 4, Flow>(&m_controller, *m_flow)
                       .local<&Flow::run>()
                       .build())
     {
@@ -28,7 +28,7 @@ namespace galay::redis
 
     PoolAcquireAwaitable::PoolAcquireAwaitable(RedisConnectionPool& pool)
         : m_flow(std::make_unique<Flow>(pool))
-        , m_inner(galay::kernel::AwaitableBuilder<Result, 4, Flow>(&pool.m_builder_controller, *m_flow)
+        , m_inner(galay::kernel::AwaitableBuilder<Result, 4, Flow>(&m_controller, *m_flow)
                       .local<&Flow::run>()
                       .build())
     {
@@ -691,7 +691,7 @@ namespace galay::redis
 
     RedissPoolInitializeAwaitable::RedissPoolInitializeAwaitable(RedissConnectionPool& pool)
         : m_flow(std::make_unique<Flow>(pool))
-        , m_inner(galay::kernel::AwaitableBuilder<Result, 4, Flow>(&pool.m_builder_controller, *m_flow)
+        , m_inner(galay::kernel::AwaitableBuilder<Result, 4, Flow>(&m_controller, *m_flow)
                       .local<&Flow::run>()
                       .build())
     {
@@ -709,7 +709,7 @@ namespace galay::redis
 
     RedissPoolAcquireAwaitable::RedissPoolAcquireAwaitable(RedissConnectionPool& pool)
         : m_flow(std::make_unique<Flow>(pool))
-        , m_inner(galay::kernel::AwaitableBuilder<Result, 4, Flow>(&pool.m_builder_controller, *m_flow)
+        , m_inner(galay::kernel::AwaitableBuilder<Result, 4, Flow>(&m_controller, *m_flow)
                       .local<&Flow::run>()
                       .build())
     {

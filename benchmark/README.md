@@ -4,6 +4,7 @@
 
 - `B1-redis_client_bench.cc`：RedisClient `normal` / `normal-batch` / `pipeline` 压测
 - `B2-connection_pool_bench.cc`：连接池并发压测
+- `B3-rediss_client_bench.cc`：RedissClient `normal` / `pipeline` 压测
 
 构建：
 
@@ -63,20 +64,13 @@ B1 输出包含：
 
 ## Rust 对齐基准
 
-Rust 同机同参对齐工具在 `benchmarks/rust/`：
+Rust 同机同参对齐工具在 `benchmark/compare/rust/`：
 
 ```bash
-bash benchmarks/rust/run_rust_alignment.sh --help
+bash benchmark/compare/rust/run_rust_alignment.sh --help
 ```
 
-公平性约束：
-
-- `baseline`：按 `B1/B3` 的模型走，每个 worker 使用独立 client/connection，不借共享连接自动流水线偷优势。
-- `ceiling`：允许使用各 Rust 客户端推荐的共享/自动流水线路径，只作为 native reference，不作为严格 apples-to-apples 结论。
-
-结果记录：
-
-- `docs/plans/2026-03-24-rust-redis-benchmark-alignment-results.md`
+默认对齐路径是 `B1-redis_client_bench`（normal/pipeline）与 Rust 同参数客户端，便于快速判断 C++ 路径是否退化。
 
 B2 示例：
 

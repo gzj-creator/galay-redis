@@ -6,3 +6,6 @@ build*/
 # Redis data files
 dump.rdb
 *.rdb
+
+# Rust benchmark artifacts
+benchmark/compare/rust/target/

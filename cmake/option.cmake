@@ -6,7 +6,7 @@ if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
 endif()
 
 # 构建目标选项
-option(BUILD_TESTS "Build test executables" ON)
+option(BUILD_TESTS "Legacy alias for BUILD_TESTING" OFF)
 option(BUILD_BENCHMARKS "Build benchmark executables" ON)
 option(BUILD_EXAMPLES "Build example executables" ON)
 option(GALAY_REDIS_ENABLE_SSL "Enable SSL/TLS support (requires galay-ssl)" OFF)

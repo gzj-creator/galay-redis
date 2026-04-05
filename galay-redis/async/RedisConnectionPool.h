@@ -267,6 +267,7 @@ namespace galay::redis
         using InnerAwaitable =
             galay::kernel::StateMachineAwaitable<typename galay::kernel::AwaitableBuilder<Result, 4, Flow>::MachineT>;
 
+        galay::kernel::IOController m_controller{GHandle::invalid()};
         std::unique_ptr<Flow> m_flow;
         InnerAwaitable m_inner;
     };
@@ -308,6 +309,7 @@ namespace galay::redis
         using InnerAwaitable =
             galay::kernel::StateMachineAwaitable<typename galay::kernel::AwaitableBuilder<Result, 4, Flow>::MachineT>;
 
+        galay::kernel::IOController m_controller{GHandle::invalid()};
         std::unique_ptr<Flow> m_flow;
         InnerAwaitable m_inner;
     };
@@ -345,6 +347,7 @@ namespace galay::redis
         using InnerAwaitable =
             galay::kernel::StateMachineAwaitable<typename galay::kernel::AwaitableBuilder<Result, 4, Flow>::MachineT>;
 
+        galay::kernel::IOController m_controller{GHandle::invalid()};
         std::unique_ptr<Flow> m_flow;
         InnerAwaitable m_inner;
     };
@@ -383,6 +386,7 @@ namespace galay::redis
         using InnerAwaitable =
             galay::kernel::StateMachineAwaitable<typename galay::kernel::AwaitableBuilder<Result, 4, Flow>::MachineT>;
 
+        galay::kernel::IOController m_controller{GHandle::invalid()};
         std::unique_ptr<Flow> m_flow;
         InnerAwaitable m_inner;
     };
@@ -555,8 +559,6 @@ namespace galay::redis
         // 日志
         RedisLoggerPtr m_logger;
 
-        // 本地 builder awaitable 的占位控制器；纯 local step 会同步完成，不会真正注册 IO。
-        galay::kernel::IOController m_builder_controller{GHandle::invalid()};
     };
 
     class RedissConnectionPool
@@ -627,7 +629,6 @@ namespace galay::redis
         std::atomic<size_t> m_peak_active_connections{0};
 
         RedisLoggerPtr m_logger;
-        galay::kernel::IOController m_builder_controller{GHandle::invalid()};
     };
 
     /**

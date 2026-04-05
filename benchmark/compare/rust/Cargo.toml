@@ -1,0 +1,7 @@
+[package]
+name = "galay-redis-rust-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+redis = "0.27"

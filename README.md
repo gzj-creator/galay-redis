@@ -42,9 +42,18 @@
 - 外部依赖：`OpenSSL`、`spdlog`
 - 内部依赖：`galay-kernel`、`galay-utils`
 - TLS 额外依赖：`galay-ssl`（当 `GALAY_REDIS_ENABLE_SSL=ON` 时）
-- 可选构建开关：`BUILD_EXAMPLES`、`BUILD_TESTS`、`BUILD_BENCHMARKS`、`GALAY_REDIS_ENABLE_SSL`
+- 可选构建开关：`BUILD_EXAMPLES`、`BUILD_TESTING`、`BUILD_BENCHMARKS`、`GALAY_REDIS_ENABLE_SSL`
+- 兼容开关：`BUILD_TESTS` 仍可用，但只作为 `BUILD_TESTING` 的旧别名
 
 如果 `galay-kernel` / `galay-utils` 没有安装到默认搜索路径，需要通过 `CMAKE_PREFIX_PATH` 或各自的 package config 让 `find_package(...)` 可见。
+
+monorepo 联调时，推荐把共享前缀放在 `CMAKE_PREFIX_PATH` 首位：
+
+```bash
+-DCMAKE_PREFIX_PATH=/Users/gongzhijie/Desktop/projects/git/.galay-prefix/latest
+```
+
+当前 `galay-kernel` 对齐基线是 `3.4.4+`。
 
 `examples/`、`test/`、`benchmark/` 现在不再写死 `/usr/local/include` 或 `/opt/homebrew`。如果依赖安装在自定义前缀，请在配置阶段通过 `CMAKE_PREFIX_PATH`、`OpenSSL_ROOT_DIR` 或对应 package config 暴露它们。
 
@@ -54,7 +63,7 @@
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DBUILD_EXAMPLES=ON \
-  -DBUILD_TESTS=ON \
+  -DBUILD_TESTING=ON \
   -DBUILD_BENCHMARKS=ON
 cmake --build build --parallel
 ```
@@ -65,7 +74,7 @@ cmake --build build --parallel
 cmake -S . -B build-ssl \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DGALAY_REDIS_ENABLE_SSL=ON \
-  -DBUILD_TESTS=ON
+  -DBUILD_TESTING=ON
 cmake --build build-ssl --parallel
 ```
 
@@ -92,7 +101,7 @@ find_package(galay-redis CONFIG REQUIRED)
 target_link_libraries(your_app PRIVATE galay-redis::galay-redis)
 ```
 
-如果 `galay-kernel`、`galay-utils` 或 `spdlog` 安装在自定义前缀，请把对应前缀加入 `CMAKE_PREFIX_PATH`。在源码树内联调时，也仍然可以使用 `add_subdirectory(...)`：
+如果 `galay-kernel`、`spdlog` 或可选的 `galay-ssl` 安装在自定义前缀，请把对应前缀加入 `CMAKE_PREFIX_PATH`。`galay-utils` 仍然是本仓库的构建依赖，但不再作为安装消费方必须显式重建的公开链接依赖。在源码树内联调时，也仍然可以使用 `add_subdirectory(...)`：
 
 ```cmake
 add_subdirectory(external/galay-redis)
@@ -165,6 +174,8 @@ Coroutine demo(IOScheduler* scheduler)
 
 更多映射见 [docs/04-示例代码.md](docs/04-示例代码.md)。
 
+模块工具链可用时，`examples/import/` 里还会生成与 `E1`~`E3` 对应的 `*-import` 目标，用来验证 `import galay.redis;` 的消费路径。
+
 ## Benchmark 现状
 
 仓库中的真实 benchmark 目标名是：
@@ -210,7 +221,7 @@ auto ping_result = co_await client.command(RedisCommandBuilder().ping()).timeout
 ## 已知限制
 
 - 面向业务代码的主文档流仍以 `RedisCommandBuilder` + `command` / `batch` / `execute` 为主；`commandBorrowed` / `batchBorrowed` 只在 API 参考与 benchmark 口径里单独说明，按内部 trusted fast path 对待
-- `sync/RedisSession.h` 仍是公开头文件，但没有对应的 examples/benchmarks 覆盖；已在 API 参考里单独隔离说明
+- `sync/RedisSession.*` 仍保留在源码树中做遗留同步路径维护，但当前安装规则与模块合同都已将它排除在公开消费面之外
 - `RedisClient` 支持移动，但头文件明确要求不要在 awaitable 进行中移动对象
 - `RedisConnectOptions::version` 在 async 连接路径里目前被用作 IPv4/IPv6 选择提示，`6` 表示 IPv6；它不是本文档里的 RESP3 开关
 - `E3-topology_pubsub_demo` 主要演示 API 形状；真实 MOVED/ASK 与 Sentinel failover 请看 `T13-integration_cluster_sentinel`
