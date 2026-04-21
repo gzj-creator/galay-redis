@@ -1,11 +1,11 @@
 find_package(galay-kernel 3.4.4 CONFIG REQUIRED)
-find_package(galay-utils CONFIG REQUIRED)
+find_package(galay-utils 1.0.3 CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(spdlog REQUIRED)
 include(CMakePackageConfigHelpers)
 
 if(GALAY_REDIS_ENABLE_SSL)
-    find_package(galay-ssl CONFIG REQUIRED)
+    find_package(galay-ssl 1.2.2 CONFIG REQUIRED)
 
     if(NOT TARGET galay-ssl::galay-ssl)
         message(FATAL_ERROR "galay-ssl::galay-ssl target not found. Please install galay-ssl or disable GALAY_REDIS_ENABLE_SSL.")
