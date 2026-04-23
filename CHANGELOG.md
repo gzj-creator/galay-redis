@@ -8,6 +8,9 @@
 
 ## [Unreleased]
 
+### Docs
+- 修正高级主题文档中的 CMake 包文件名说明，改为当前真实安装导出的 `galay-redis-config.cmake` 与 `galay-redis-config-version.cmake`。
+
 ## [v1.2.2] - 2026-04-21
 
 ### Changed
