@@ -39,10 +39,10 @@ if [[ "$MODE" != "normal" && "$MODE" != "pipeline" ]]; then
     exit 1
 fi
 
-CPP_BIN="${BUILD_DIR}/benchmark/B1-redis_client_bench"
+CPP_BIN="${BUILD_DIR}/benchmark/b1_client"
 if [[ ! -x "${CPP_BIN}" ]]; then
     echo "C++ benchmark binary not found: ${CPP_BIN}"
-    echo "build first: cmake --build ${BUILD_DIR} --target B1-redis_client_bench"
+    echo "build first: cmake --build ${BUILD_DIR} --target b1_client"
     exit 1
 fi
 

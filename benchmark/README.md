@@ -2,9 +2,9 @@
 
 目录结构：
 
-- `B1-redis_client_bench.cc`：RedisClient `normal` / `normal-batch` / `pipeline` 压测
-- `B2-connection_pool_bench.cc`：连接池并发压测
-- `B3-rediss_client_bench.cc`：RedissClient `normal` / `pipeline` 压测
+- `b1_client.cc`：RedisClient `normal` / `normal-batch` / `pipeline` 压测
+- `b2_pool.cc`：连接池并发压测
+- `b3_rediss.cc`：RedissClient `normal` / `pipeline` 压测
 
 构建：
 
@@ -13,10 +13,10 @@ cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCHMARKS=ON
 cmake --build build-release --parallel
 ```
 
-## B1 参数
+## b1 参数
 
 ```bash
-./build-release/benchmark/B1-redis_client_bench \
+./build-release/benchmark/b1_client \
   [-h host] [-p port] [-c clients] [-n operations] \
   [-m normal|normal-batch|pipeline] [-b batch_size] \
   [--timeout-ms -1|N] [--buffer-size bytes] [--track-alloc] [-q]
@@ -26,7 +26,7 @@ cmake --build build-release --parallel
 - `--buffer-size`: 客户端 ring-buffer 大小，跨客户端对比时必须保持一致。
 - `--track-alloc`: 启用分配统计（会引入额外开销，建议只在 allocation 分析时开启）。
 
-当前 `B1` mode 对应的实现路径：
+当前 `b1` mode 对应的实现路径：
 
 - `normal`：复用预编码 RESP 字节，通过 `RedisClient::commandBorrowed(...)` 发送。
 - `pipeline`：复用 `RedisCommandBuilder::encoded()`，通过 `RedisClient::batchBorrowed(...)` 发送。
@@ -34,7 +34,7 @@ cmake --build build-release --parallel
 
 所以 plain `normal` / `pipeline` 的数字，表示当前 borrowed fast path 的吞吐，不等于所有 owning API 的泛化 baseline。
 
-B1 输出包含：
+b1 输出包含：
 - `Ops/sec`（吞吐）
 - `Request latency p50/p99`（单次请求/批次调用延迟）
 - `Alloc calls/op`、`Alloc bytes/op`（仅在 `--track-alloc` 时输出）
@@ -49,7 +49,7 @@ B1 输出包含：
 示例（pipeline，无 timeout）：
 
 ```bash
-./build-release/benchmark/B1-redis_client_bench \
+./build-release/benchmark/b1_client \
   -h 127.0.0.1 -p 6379 -c 10 -n 50000 -m pipeline -b 100 \
   --timeout-ms -1 --buffer-size 32768 -q
 ```
@@ -57,7 +57,7 @@ B1 输出包含：
 示例（normal-batch，开启分配统计）：
 
 ```bash
-./build-release/benchmark/B1-redis_client_bench \
+./build-release/benchmark/b1_client \
   -h 127.0.0.1 -p 6379 -c 10 -n 50000 -m normal-batch -b 100 \
   --timeout-ms -1 --buffer-size 32768 --track-alloc -q
 ```
@@ -70,10 +70,10 @@ Rust 同机同参对齐工具在 `benchmark/compare/rust/`：
 bash benchmark/compare/rust/run_rust_alignment.sh --help
 ```
 
-默认对齐路径是 `B1-redis_client_bench`（normal/pipeline）与 Rust 同参数客户端，便于快速判断 C++ 路径是否退化。
+默认对齐路径是 `b1_client`（normal/pipeline）与 Rust 同参数客户端，便于快速判断 C++ 路径是否退化。
 
-B2 示例：
+b2 示例：
 
 ```bash
-./build-release/benchmark/B2-connection_pool_bench -h 127.0.0.1 -p 6379 -c 20 -n 300 -m 4 -x 20 -q
+./build-release/benchmark/b2_pool -h 127.0.0.1 -p 6379 -c 20 -n 300 -m 4 -x 20 -q
 ```

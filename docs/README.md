@@ -6,13 +6,13 @@
 
 | 文件 | 主题 | 主要真相来源 |
 |---|---|---|
-| [00-快速开始](00-快速开始.md) | 编译、第一条命令、最短验证路径 | `CMakeLists.txt`、`examples/include/E1-async_basic_demo.cc`、`test/T1-async.cc` |
+| [00-快速开始](00-快速开始.md) | 编译、第一条命令、最短验证路径 | `CMakeLists.txt`、`examples/include/e1_basic.cc`、`test/t1_async.cc` |
 | [01-架构设计](01-架构设计.md) | 模块分层、执行链路、拓扑与连接池 | `galay-redis/async/*.h`、`galay-redis/protocol/*.h` |
-| [02-API参考](02-API参考.md) | 当前安装头文件、模块导出面与目标名 | `galay-redis/**/*.h`、`galay-redis/module/galay.redis.cppm` |
-| [03-使用指南](03-使用指南.md) | 从旧接口迁移到 `command` / `batch` / `execute` | `examples/`、`test/T4~T13` |
+| [02-API参考](02-API参考.md) | 当前安装头文件、模块导出面与目标名 | `galay-redis/**/*.h`、`galay-redis/module/galay_redis.cppm` |
+| [03-使用指南](03-使用指南.md) | 从旧接口迁移到 `command` / `batch` / `execute` | `examples/`、`test/t4~t13` |
 | [04-示例代码](04-示例代码.md) | 示例、测试、运行命令、环境变量 | `examples/CMakeLists.txt`、`test/CMakeLists.txt` |
 | [05-性能测试](05-性能测试.md) | 当前 benchmark 目标、CLI、结果声明 | `benchmark/*.cc`、`benchmark/CMakeLists.txt` |
-| [06-高级主题](06-高级主题.md) | 模块构建、single-flight、限制与权衡 | `galay-redis/CMakeLists.txt`、`test/T12-topology_singleflight.cc` |
+| [06-高级主题](06-高级主题.md) | 模块构建、single-flight、限制与权衡 | `galay-redis/CMakeLists.txt`、`test/t12_topology.cc` |
 | [07-常见问题](07-常见问题.md) | 迁移、构建、返回值、拓扑排障 | 上述页面与实际源码 |
 
 ## 主题边界

@@ -1,11 +1,11 @@
-find_package(galay-kernel 3.4.4 CONFIG REQUIRED)
-find_package(galay-utils 1.0.3 CONFIG REQUIRED)
+find_package(galay-kernel 4.0.0 CONFIG REQUIRED)
+find_package(galay-utils 2.0.0 CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(spdlog REQUIRED)
 include(CMakePackageConfigHelpers)
 
 if(GALAY_REDIS_ENABLE_SSL)
-    find_package(galay-ssl 1.2.2 CONFIG REQUIRED)
+    find_package(galay-ssl 2.0.0 CONFIG REQUIRED)
 
     if(NOT TARGET galay-ssl::galay-ssl)
         message(FATAL_ERROR "galay-ssl::galay-ssl target not found. Please install galay-ssl or disable GALAY_REDIS_ENABLE_SSL.")
@@ -144,7 +144,7 @@ if(GALAY_REDIS_IMPORT_COMPILATION_ENABLED AND CMAKE_VERSION VERSION_GREATER_EQUA
     target_sources(${PROJECT_NAME}-modules
         PUBLIC
             FILE_SET CXX_MODULES
-            FILES ${CMAKE_CURRENT_SOURCE_DIR}/module/galay.redis.cppm
+            FILES ${CMAKE_CURRENT_SOURCE_DIR}/module/galay_redis.cppm
     )
     if(GALAY_REDIS_IMPORT_COMPILE_OPTIONS)
         target_compile_options(${PROJECT_NAME}-modules PUBLIC ${GALAY_REDIS_IMPORT_COMPILE_OPTIONS})

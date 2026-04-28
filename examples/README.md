@@ -3,8 +3,8 @@
 目录结构（参考 galay-rpc / galay-http）：
 
 - `common/`：示例公共配置
-- `include/`：头文件消费示例（E1~E3）
-- `import/`：模块消费示例（E1~E3，只有模块工具链可用时才生成 target）
+- `include/`：头文件消费示例（e1~e3）
+- `import/`：模块消费示例（e1~e3，只有模块工具链可用时才生成 target）
 
 构建：
 
@@ -16,18 +16,18 @@ cmake --build build --parallel
 运行：
 
 ```bash
-./build/examples/E1-async_basic_demo 127.0.0.1 6379
-./build/examples/E2-pipeline_demo 127.0.0.1 6379 demo:pipeline: 20
-./build/examples/E3-topology_pubsub_demo 127.0.0.1 6379
-./build/examples/E1-async_basic_demo-import 127.0.0.1 6379
-./build/examples/E2-pipeline_demo-import 127.0.0.1 6379 demo:pipeline: 20
-./build/examples/E3-topology_pubsub_demo-import 127.0.0.1 6379
+./build/examples/e1_basic 127.0.0.1 6379
+./build/examples/e2_pipeline 127.0.0.1 6379 demo:pipeline: 20
+./build/examples/e3_pubsub 127.0.0.1 6379
+./build/examples/e1_basic-import 127.0.0.1 6379
+./build/examples/e2_pipeline-import 127.0.0.1 6379 demo:pipeline: 20
+./build/examples/e3_pubsub-import 127.0.0.1 6379
 ```
 
 如果当前工具链不支持仓库的 C++23 模块路径，`*-import` 目标会在配置阶段被自动跳过。
 
 ## 示例与模块对齐
 
-- `E1-async_basic_demo` ↔ `E1-async_basic_demo-import`
-- `E2-pipeline_demo` ↔ `E2-pipeline_demo-import`
-- `E3-topology_pubsub_demo` ↔ `E3-topology_pubsub_demo-import`
+- `e1_basic` ↔ `e1_basic-import`
+- `e2_pipeline` ↔ `e2_pipeline-import`
+- `e3_pubsub` ↔ `e3_pubsub-import`

@@ -9,7 +9,7 @@
 
 已有上下文：
 
-- `RedisClientAwaitable`、`RedisPipelineAwaitable`、`RedisConnectAwaitable` 已经朝 `Task.h + AwaitableBuilder::fromStateMachine(...)` 收敛
+- `RedisClientAwaitable`、`RedisPipelineAwaitable`、`RedisConnectAwaitable` 已经朝 `task.h + AwaitableBuilder::fromStateMachine(...)` 收敛
 - `PoolInitializeAwaitable`、`PoolAcquireAwaitable` 已改为 builder-backed facade
 - `RedisTopologyClient` 仍保留 `RedisCommandResultAwaitable` 这类“协调型 awaitable”
 - 模块前导与 CMake 依赖顺序还没有完全对齐 `galay-http`
@@ -229,14 +229,14 @@ API 规则：
   - `find_package(galay-ssl REQUIRED)`
   - 链接 `galay-ssl::galay-ssl`
   - 增加 TLS 编译宏
-- `ModulePrelude.hpp` 去掉对 `Coroutine.h` 的探测
+- `module_prelude.hpp` 去掉对 `Coroutine.h` 的探测
 - 改为显式纳入：
-  - `Task.h`
-  - `Awaitable.h`
-  - `galay-ssl/async/SslSocket.h`
-  - `galay-ssl/async/SslAwaitableCore.h`
-  - `galay-ssl/ssl/SslContext.h`
-- `galay.redis.cppm` 导出 TLS 客户端相关头
+  - `task.h`
+  - `awaitable.h`
+  - `galay-ssl/async/ssl_socket.h`
+  - `galay-ssl/async/ssl_awaitable_core.h`
+  - `galay-ssl/ssl/ssl_context.h`
+- `galay_redis.cppm` 导出 TLS 客户端相关头
 
 ## 错误处理
 
@@ -259,7 +259,7 @@ API 规则：
 
 ### 编译与表面
 
-- `Task.h` / 模块前导无 `Coroutine.h`
+- `task.h` / 模块前导无 `Coroutine.h`
 - `GALAY_REDIS_ENABLE_SSL=ON/OFF` 都可配置
 - `RedisCommandResultAwaitable` 不再存在
 - topology 接口改成 `Task<...>`

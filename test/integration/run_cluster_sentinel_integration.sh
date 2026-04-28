@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd)"
-COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.cluster-sentinel.yml"
+COMPOSE_FILE="${SCRIPT_DIR}/docker_compose_cluster_sentinel.yml"
 
 : "${KEEP_IT_ENV:=0}"
 : "${IT_ENV_STARTED:=0}"

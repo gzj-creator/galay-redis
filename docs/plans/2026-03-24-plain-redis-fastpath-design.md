@@ -97,7 +97,7 @@ It does not own storage.
 
 ### 2. Redis exchange state supports owned or borrowed bytes
 
-Update `detail::RedisExchangeSharedState` in `galay-redis/async/RedisClient.h` and `galay-redis/async/RedisClient.cc` so the send path can read from either:
+Update `detail::RedisExchangeSharedState` in `galay-redis/async/redis_client.h` and `galay-redis/async/redis_client.cc` so the send path can read from either:
 
 - an owned `std::string`
 - a borrowed `std::string_view`
@@ -120,7 +120,7 @@ These methods are intentionally lower-level than the public `command`/`batch` AP
 
 ### 4. Benchmark integration
 
-Update `benchmark/B1-redis_client_bench.cc`:
+Update `benchmark/b1_client.cc`:
 
 - `plain normal`
   - pre-encode the `SET` and `GET` commands per loop iteration
@@ -148,8 +148,8 @@ Add targeted tests for:
 Re-run at minimum:
 
 ```bash
-./build-ssl-probe/benchmark/B1-redis_client_bench --clients 10 --operations 5000 --mode normal -q
-./build-ssl-probe/benchmark/B1-redis_client_bench --clients 10 --operations 5000 --mode pipeline --batch-size 50 -q
+./build-ssl-probe/benchmark/b1_client --clients 10 --operations 5000 --mode normal -q
+./build-ssl-probe/benchmark/b1_client --clients 10 --operations 5000 --mode pipeline --batch-size 50 -q
 ```
 
 Then re-run the aligned Rust comparison to confirm the plain gaps shrink while TLS remains stable.

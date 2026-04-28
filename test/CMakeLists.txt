@@ -11,21 +11,21 @@ configure_file(
 )
 
 add_test(
-    NAME T24-interface-contract
+    NAME t24_interface_contract
     COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/interface/verify_interface.cmake
 )
-set_tests_properties(T24-interface-contract PROPERTIES LABELS "interface;unit")
+set_tests_properties(t24_interface_contract PROPERTIES LABELS "interface;unit")
 
 set(GALAY_REDIS_UNIT_TESTS
-    T3-protocol
-    T8-redis_batch_timeout_api
-    T9-redis_batch_span_api
-    T10-redis_raw_command_api
-    T12-topology_singleflight
-    T14-redis_value_size
-    T15-awaitable_surface
-    T16-rediss_surface
-    T20-resp_encoder_estimate
+    t3_protocol
+    t8_batch
+    t9_span
+    t10_command
+    t12_topology
+    t14_size
+    t15_surface
+    t16_rediss
+    t20_encoder
 )
 
 foreach(SRC ${SRC_LIST})
@@ -41,7 +41,7 @@ foreach(SRC ${SRC_LIST})
         INSTALL_RPATH $ORIGIN/../lib
     )
     add_test(NAME ${EXECUTABLE_NAME} COMMAND ${EXECUTABLE_NAME})
-    if(EXECUTABLE_NAME STREQUAL "T13-integration_cluster_sentinel")
+    if(EXECUTABLE_NAME STREQUAL "t13_cluster")
         set_tests_properties(${EXECUTABLE_NAME} PROPERTIES LABELS integration)
     elseif(EXECUTABLE_NAME IN_LIST GALAY_REDIS_UNIT_TESTS)
         set_tests_properties(${EXECUTABLE_NAME} PROPERTIES LABELS "unit;redis")

@@ -89,7 +89,7 @@ GALAY_IT_ENABLE=1 ctest --test-dir build --output-on-failure -L integration
 如果你只想确认当前 awaitable / 连接池公开 surface 与源码一致，可直接运行：
 
 ```bash
-ctest --test-dir build --output-on-failure -R T15-awaitable_surface
+ctest --test-dir build --output-on-failure -R t15_surface
 ```
 
 ## 在你的项目中接入
@@ -112,15 +112,15 @@ target_link_libraries(your_app PRIVATE galay-redis)
 
 ## 30 秒上手
 
-来源：`examples/include/E1-async_basic_demo.cc`
+来源：`examples/include/e1_basic.cc`
 
-- 目标：`E1-async_basic_demo`
-- 运行：`./<build-dir>/examples/E1-async_basic_demo 127.0.0.1 6379`
+- 目标：`e1_basic`
+- 运行：`./<build-dir>/examples/e1_basic 127.0.0.1 6379`
 - 环境变量：无
 
 ```cpp
-#include "galay-redis/async/RedisClient.h"
-#include <galay-kernel/kernel/Runtime.h>
+#include "galay-redis/async/redis_client.h"
+#include <galay-kernel/kernel/runtime.h>
 #include <chrono>
 #include <iostream>
 
@@ -161,31 +161,31 @@ Coroutine demo(IOScheduler* scheduler)
 
 | 场景 | 源文件 | 目标 | 运行命令 | 环境 |
 |---|---|---|---|---|
-| 基础异步命令 | `examples/include/E1-async_basic_demo.cc` | `E1-async_basic_demo` | `./<build-dir>/examples/E1-async_basic_demo 127.0.0.1 6379` | 本地 Redis |
-| 批量发送 | `examples/include/E2-pipeline_demo.cc` | `E2-pipeline_demo` | `./<build-dir>/examples/E2-pipeline_demo 127.0.0.1 6379 demo:pipeline: 20` | 本地 Redis |
-| Pub/Sub 与拓扑 API 形状 | `examples/include/E3-topology_pubsub_demo.cc` | `E3-topology_pubsub_demo` | `./<build-dir>/examples/E3-topology_pubsub_demo 127.0.0.1 6379` | 单节点 Redis；非真实 failover |
-| `rediss://` TLS smoke | `test/T17-rediss_client_tls.cc` | `T17-rediss_client_tls` | `GALAY_REDIS_TLS_URL=rediss://... ./<build-dir>/test/T17-rediss_client_tls` | TLS Redis，可选 `GALAY_REDIS_TLS_CA` / `GALAY_REDIS_TLS_VERIFY_PEER` / `GALAY_REDIS_TLS_SERVER_NAME` |
-| TLS pool + topology smoke | `test/T19-rediss_pool_and_topology.cc` | `T19-rediss_pool_and_topology` | `GALAY_REDIS_TLS_URL=rediss://... ./<build-dir>/test/T19-rediss_pool_and_topology` | TLS Redis，可选 Sentinel / Cluster 环境变量 |
-| timeout 行为 | `test/T5-redis_client_timeout.cc` | `T5-redis_client_timeout` | `./<build-dir>/test/T5-redis_client_timeout` | 本地 Redis |
-| raw command API | `test/T10-redis_raw_command_api.cc` | `T10-redis_raw_command_api` | `./<build-dir>/test/T10-redis_raw_command_api` | 无 |
-| awaitable / pool surface 回归 | `test/T15-awaitable_surface.cc` | `T15-awaitable_surface` | `./<build-dir>/test/T15-awaitable_surface` | 无 |
-| topology + pubsub | `test/T11-topology_and_pubsub.cc` | `T11-topology_and_pubsub` | `./<build-dir>/test/T11-topology_and_pubsub` | 本地 Redis |
-| real cluster + sentinel | `test/T13-integration_cluster_sentinel.cc` | `T13-integration_cluster_sentinel` | `test/integration/run_cluster_sentinel_integration.sh --build-dir <build-dir>` | Docker、`redis-cli` |
+| 基础异步命令 | `examples/include/e1_basic.cc` | `e1_basic` | `./<build-dir>/examples/e1_basic 127.0.0.1 6379` | 本地 Redis |
+| 批量发送 | `examples/include/e2_pipeline.cc` | `e2_pipeline` | `./<build-dir>/examples/e2_pipeline 127.0.0.1 6379 demo:pipeline: 20` | 本地 Redis |
+| Pub/Sub 与拓扑 API 形状 | `examples/include/e3_pubsub.cc` | `e3_pubsub` | `./<build-dir>/examples/e3_pubsub 127.0.0.1 6379` | 单节点 Redis；非真实 failover |
+| `rediss://` TLS smoke | `test/t17_tls.cc` | `t17_tls` | `GALAY_REDIS_TLS_URL=rediss://... ./<build-dir>/test/t17_tls` | TLS Redis，可选 `GALAY_REDIS_TLS_CA` / `GALAY_REDIS_TLS_VERIFY_PEER` / `GALAY_REDIS_TLS_SERVER_NAME` |
+| TLS pool + topology smoke | `test/t19_topology.cc` | `t19_topology` | `GALAY_REDIS_TLS_URL=rediss://... ./<build-dir>/test/t19_topology` | TLS Redis，可选 Sentinel / Cluster 环境变量 |
+| timeout 行为 | `test/t5_timeout.cc` | `t5_timeout` | `./<build-dir>/test/t5_timeout` | 本地 Redis |
+| raw command API | `test/t10_command.cc` | `t10_command` | `./<build-dir>/test/t10_command` | 无 |
+| awaitable / pool surface 回归 | `test/t15_surface.cc` | `t15_surface` | `./<build-dir>/test/t15_surface` | 无 |
+| topology + pubsub | `test/t11_pubsub.cc` | `t11_pubsub` | `./<build-dir>/test/t11_pubsub` | 本地 Redis |
+| real cluster + sentinel | `test/t13_cluster.cc` | `t13_cluster` | `test/integration/run_cluster_sentinel_integration.sh --build-dir <build-dir>` | Docker、`redis-cli` |
 
 更多映射见 [docs/04-示例代码.md](docs/04-示例代码.md)。
 
-模块工具链可用时，`examples/import/` 里还会生成与 `E1`~`E3` 对应的 `*-import` 目标，用来验证 `import galay.redis;` 的消费路径。
+模块工具链可用时，`examples/import/` 里还会生成与 `e1`~`e3` 对应的 `*-import` 目标，用来验证 `import galay.redis;` 的消费路径。
 
 ## Benchmark 现状
 
 仓库中的真实 benchmark 目标名是：
 
-- `B1-redis_client_bench`
-- `B2-connection_pool_bench`
+- `b1_client`
+- `b2_pool`
 
-旧文档中的 `B1-RedisClientBench` / `B2-ConnectionPoolBench` 已废弃。当前 README 不再内嵌历史 QPS 数字；如果你需要复现实验命令、输出字段和注意事项，请直接看 [docs/05-性能测试.md](docs/05-性能测试.md)。
+旧文档中的 `b1_client` / `b2_pool` 已废弃。当前 README 不再内嵌历史 QPS 数字；如果你需要复现实验命令、输出字段和注意事项，请直接看 [docs/05-性能测试.md](docs/05-性能测试.md)。
 
-`B1` 当前的 plain 模式口径还需要特别注意：
+`b1` 当前的 plain 模式口径还需要特别注意：
 
 - `normal` 复用预编码 RESP 字节，并通过 `RedisClient::commandBorrowed(...)` 发送
 - `pipeline` 复用 `RedisCommandBuilder::encoded()`，并通过 `RedisClient::batchBorrowed(...)` 发送
@@ -224,7 +224,7 @@ auto ping_result = co_await client.command(RedisCommandBuilder().ping()).timeout
 - `sync/RedisSession.*` 仍保留在源码树中做遗留同步路径维护，但当前安装规则与模块合同都已将它排除在公开消费面之外
 - `RedisClient` 支持移动，但头文件明确要求不要在 awaitable 进行中移动对象
 - `RedisConnectOptions::version` 在 async 连接路径里目前被用作 IPv4/IPv6 选择提示，`6` 表示 IPv6；它不是本文档里的 RESP3 开关
-- `E3-topology_pubsub_demo` 主要演示 API 形状；真实 MOVED/ASK 与 Sentinel failover 请看 `T13-integration_cluster_sentinel`
+- `e3_pubsub` 主要演示 API 形状；真实 MOVED/ASK 与 Sentinel failover 请看 `t13_cluster`
 - 模块导入构建存在额外工具链限制，不是所有 Clang/GCC 组合都可用
 
 ## 仓库内相关索引

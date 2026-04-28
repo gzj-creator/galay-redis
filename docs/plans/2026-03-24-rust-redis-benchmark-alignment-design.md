@@ -7,7 +7,7 @@
 - awaitable 体系向 `Builder + StateMachine` 收敛
 - `rediss://` / TLS 客户端能力落地
 - TLS 命令收发热路径切到 `galay-ssl` 原生状态机
-- 基础 benchmark (`B1` / `B3`) 能稳定输出 plain/TLS 的 normal 与 pipeline 吞吐
+- 基础 benchmark (`b1` / `b3`) 能稳定输出 plain/TLS 的 normal 与 pipeline 吞吐
 
 下一步目标不是继续盲目调优，而是先回答一个更关键的问题：
 
@@ -29,7 +29,7 @@
   - `plain pipeline`
   - `TLS normal`
   - `TLS pipeline`
-- 在同一套参数下输出与现有 `B1` / `B3` 尽量一致的指标
+- 在同一套参数下输出与现有 `b1` / `b3` 尽量一致的指标
 
 ### 分析目标
 
@@ -46,11 +46,11 @@
 
 ### 1. 同机同参优先于“官方自带 benchmark”
 
-Rust 客户端仓库自带 benchmark 可以作为补充参考，但不能直接拿来与本仓库 `B1/B3` 对表。原因是：
+Rust 客户端仓库自带 benchmark 可以作为补充参考，但不能直接拿来与本仓库 `b1/b3` 对表。原因是：
 
 - `fred.rs` 自带 benchmark 默认更偏向共享 client、高 Tokio 并发和 automatic pipelining
 - `redis-rs` 自带 benchmark 同时覆盖普通连接、pipeline 和 multiplexed async 模型
-- 它们的默认命令种类、连接共享方式、并发策略、输出口径都与当前 `B1/B3` 不一致
+- 它们的默认命令种类、连接共享方式、并发策略、输出口径都与当前 `b1/b3` 不一致
 
 因此必须优先实现本仓库内部的 Rust 最小 benchmark 程序，以保证 workload 一致。
 
@@ -153,7 +153,7 @@ Rust 客户端仓库自带 benchmark 可以作为补充参考，但不能直接�
 - `Request latency p50`
 - `Request latency p99`
 
-输出格式应尽量贴近当前 `B1` / `B3`，便于直接横向对比和后续脚本汇总。
+输出格式应尽量贴近当前 `b1` / `b3`，便于直接横向对比和后续脚本汇总。
 
 ## Rust 客户端边界
 
@@ -195,7 +195,7 @@ Rust 客户端仓库自带 benchmark 可以作为补充参考，但不能直接�
 
 每个 Rust 基准程序都应：
 
-- 支持与 `B1/B3` 尽量一致的参数接口
+- 支持与 `b1/b3` 尽量一致的参数接口
 - 同时支持 plain 和 TLS
 - 支持 normal 与 pipeline 模式
 
