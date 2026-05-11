@@ -9,3 +9,4 @@ dump.rdb
 
 # Rust benchmark artifacts
 benchmark/compare/rust/target/
+benchmark/compare/
