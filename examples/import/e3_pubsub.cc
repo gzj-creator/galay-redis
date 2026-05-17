@@ -59,7 +59,7 @@ bool readCommandSingleString(const RedisCommandResult& result, std::string& out)
     return false;
 }
 
-Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, int port)
+Task<bool> runPubSubDemo(IOScheduler* scheduler, std::string host, int port)
 {
     auto subscriber = RedisClientBuilder().scheduler(scheduler).build();
     auto publisher = RedisClientBuilder().scheduler(scheduler).build();
@@ -71,16 +71,14 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
     auto subscriber_connect = co_await subscriber.connect(host, port).timeout(std::chrono::seconds(5));
     if (!subscriber_connect) {
         std::cerr << "Subscriber connect failed: " << subscriber_connect.error().message() << std::endl;
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
 
     auto publisher_connect = co_await publisher.connect(host, port).timeout(std::chrono::seconds(5));
     if (!publisher_connect) {
         std::cerr << "Publisher connect failed: " << publisher_connect.error().message() << std::endl;
         (void)co_await subscriber.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
 
     auto subscribe_result = co_await subscriber.command(command_builder.subscribe(channel))
@@ -89,8 +87,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
         std::cerr << "SUBSCRIBE failed" << std::endl;
         (void)co_await subscriber.close();
         (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
 
     auto publish_result = co_await publisher.command(command_builder.publish(channel, message))
@@ -100,8 +97,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
         (void)co_await subscriber.command(command_builder.unsubscribe(channel));
         (void)co_await subscriber.close();
         (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
 
     auto recv_result = co_await subscriber.receive(1).timeout(std::chrono::seconds(5));
@@ -110,8 +106,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
         (void)co_await subscriber.command(command_builder.unsubscribe(channel));
         (void)co_await subscriber.close();
         (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
 
     const auto msg_array = recv_result.value()->front().toArray();
@@ -120,11 +115,19 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
         (void)co_await subscriber.command(command_builder.unsubscribe(channel));
         (void)co_await subscriber.close();
         (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
     std::cout << "E3 import pubsub received: " << msg_array[2].toString() << std::endl;
 
+    (void)co_await subscriber.command(command_builder.unsubscribe(channel));
+    (void)co_await subscriber.close();
+    (void)co_await publisher.close();
+
+    co_return true;
+}
+
+Task<bool> runMasterSlaveDemo(IOScheduler* scheduler, std::string host, int port)
+{
     auto ms_client = RedisMasterSlaveClientBuilder().scheduler(scheduler).build();
     RedisNodeAddress node_addr;
     node_addr.host = host;
@@ -134,22 +137,14 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
     auto master_connect = co_await ms_client.connectMaster(node_addr).timeout(std::chrono::seconds(5));
     if (!master_connect) {
         std::cerr << "Master connect failed: " << master_connect.error().message() << std::endl;
-        (void)co_await subscriber.command(command_builder.unsubscribe(channel));
-        (void)co_await subscriber.close();
-        (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
 
     auto replica_connect = co_await ms_client.addReplica(node_addr).timeout(std::chrono::seconds(5));
     if (!replica_connect) {
         std::cerr << "Replica connect failed: " << replica_connect.error().message() << std::endl;
         (void)co_await ms_client.master().close();
-        (void)co_await subscriber.command(command_builder.unsubscribe(channel));
-        (void)co_await subscriber.close();
-        (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
 
     const std::string ms_key = "example:ms:key";
@@ -161,11 +156,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
             (void)co_await repl->get().close();
         }
         (void)co_await ms_client.master().close();
-        (void)co_await subscriber.command(command_builder.unsubscribe(channel));
-        (void)co_await subscriber.close();
-        (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
 
     auto ms_get = co_await ms_client.execute("GET", {ms_key}, true);
@@ -176,11 +167,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
             (void)co_await repl->get().close();
         }
         (void)co_await ms_client.master().close();
-        (void)co_await subscriber.command(command_builder.unsubscribe(channel));
-        (void)co_await subscriber.close();
-        (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
     std::cout << "E3 import master-slave read: " << ms_read_value << std::endl;
 
@@ -189,6 +176,11 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
     }
     (void)co_await ms_client.master().close();
 
+    co_return true;
+}
+
+Task<bool> runClusterDemo(IOScheduler* scheduler, std::string host, int port)
+{
     auto cluster_client = RedisClusterClientBuilder().scheduler(scheduler).build();
     RedisClusterNodeAddress cluster_node;
     cluster_node.host = host;
@@ -199,11 +191,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
     auto cluster_connect = co_await cluster_client.addNode(cluster_node).timeout(std::chrono::seconds(5));
     if (!cluster_connect) {
         std::cerr << "Cluster node connect failed: " << cluster_connect.error().message() << std::endl;
-        (void)co_await subscriber.command(command_builder.unsubscribe(channel));
-        (void)co_await subscriber.close();
-        (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
 
     const std::string cluster_key = galay::redis::example::kDefaultTopologyKey;
@@ -215,11 +203,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
         if (auto node = cluster_client.node(0); node.has_value()) {
             (void)co_await node->get().close();
         }
-        (void)co_await subscriber.command(command_builder.unsubscribe(channel));
-        (void)co_await subscriber.close();
-        (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
 
     auto cluster_get = co_await cluster_client.execute("GET", {cluster_key}, cluster_key);
@@ -229,11 +213,7 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
         if (auto node = cluster_client.node(0); node.has_value()) {
             (void)co_await node->get().close();
         }
-        (void)co_await subscriber.command(command_builder.unsubscribe(channel));
-        (void)co_await subscriber.close();
-        (void)co_await publisher.close();
-        finishDemo(*state, 1);
-        co_return;
+        co_return false;
     }
     std::cout << "E3 import cluster read: " << cluster_read_value << std::endl;
 
@@ -241,9 +221,28 @@ Coroutine runDemo(IOScheduler* scheduler, DemoState* state, std::string host, in
         (void)co_await node->get().close();
     }
 
-    (void)co_await subscriber.command(command_builder.unsubscribe(channel));
-    (void)co_await subscriber.close();
-    (void)co_await publisher.close();
+    co_return true;
+}
+
+Task<void> runDemo(IOScheduler* scheduler, DemoState* state, std::string host, int port)
+{
+    auto pubsub_ok = co_await runPubSubDemo(scheduler, host, port);
+    if (!pubsub_ok) {
+        finishDemo(*state, 1);
+        co_return;
+    }
+
+    auto master_slave_ok = co_await runMasterSlaveDemo(scheduler, host, port);
+    if (!master_slave_ok) {
+        finishDemo(*state, 1);
+        co_return;
+    }
+
+    auto cluster_ok = co_await runClusterDemo(scheduler, host, port);
+    if (!cluster_ok) {
+        finishDemo(*state, 1);
+        co_return;
+    }
 
     finishDemo(*state, 0);
 }

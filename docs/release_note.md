@@ -28,3 +28,13 @@
 - Git Tag：`v2.0.1`
 - 自述摘要：
   - 移除 `benchmark/compare` 目录并收紧忽略规则，避免误提交对比基准测试代码与构建产物。
+
+## v2.0.2 - 2026-05-17
+
+- 版本级别：小版本（patch）
+- Git 提交消息：`fix: 修复 redis 示例协程编译兼容性`
+- Git Tag：`v2.0.2`
+- 自述摘要：
+  - 将 Redis examples 与 README/快速开始中的协程入口从兼容别名 `Coroutine` 迁移为显式 `Task<void>`，避免诊断继续暴露旧命名。
+  - 将 `e3_pubsub` 的大型协程拆分为 pub/sub、master-slave 与 cluster 三段 `Task<bool>` 子流程，并在顶层使用 `auto result = co_await ...; if (!result)` 的保守写法，降低 GCC 13 coroutine frame 清理路径触发 ICE 的概率。
+  - 新增接口回归检查，防止 examples 目录再次使用 `Coroutine` 返回类型；同步将 CMake project 版本提升到 `2.0.2`。

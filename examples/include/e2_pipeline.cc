@@ -56,7 +56,7 @@ std::optional<int> parsePositiveInt(const char* text)
     }
 }
 
-Coroutine runDemo(
+Task<void> runDemo(
     IOScheduler* scheduler,
     DemoState* state,
     std::string host,

@@ -41,7 +41,7 @@ std::optional<int> parsePort(const char* text)
     }
 }
 
-Coroutine runDemo(
+Task<void> runDemo(
     IOScheduler* scheduler,
     DemoState* state,
     std::string host,

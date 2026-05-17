@@ -127,7 +127,7 @@ target_link_libraries(your_app PRIVATE galay-redis)
 using namespace galay::kernel;
 using namespace galay::redis;
 
-Coroutine demo(IOScheduler* scheduler)
+Task<void> demo(IOScheduler* scheduler)
 {
     auto client = RedisClientBuilder().scheduler(scheduler).build();
     RedisCommandBuilder builder;

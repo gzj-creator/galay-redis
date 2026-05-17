@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+## [v2.0.2] - 2026-05-17
+
+### Fixed
+- 将 Redis 示例协程入口从兼容别名 `Coroutine` 迁移为显式 `Task<void>`，避免编译器诊断继续暴露旧命名。
+- 拆分 `e3_pubsub` 的大型协程为 pub/sub、master-slave 与 cluster 三段 `Task<bool>` 子流程，降低 GCC 13 在 coroutine frame 清理路径上触发 ICE 的概率。
+
+### Changed
+- README 与快速开始示例同步使用 `Task<void>`，保持文档和当前公开任务模型一致。
+- 新增接口回归检查，阻止 examples 目录再次暴露 `Coroutine` 返回类型。
+- 将 CMake project 版本提升到 `2.0.2`，对齐本次发布 tag。
+
 ## [v2.0.1] - 2026-05-11
 
 ### Chore

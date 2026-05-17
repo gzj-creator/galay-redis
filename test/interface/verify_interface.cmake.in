@@ -26,3 +26,14 @@ if(_galay_link_match)
         message(FATAL_ERROR "galay-redis still exports galay-utils through INTERFACE_LINK_LIBRARIES")
     endif()
 endif()
+
+file(GLOB_RECURSE _galay_redis_example_sources
+    "@CMAKE_SOURCE_DIR@/examples/include/*.cc"
+    "@CMAKE_SOURCE_DIR@/examples/import/*.cc"
+)
+foreach(_galay_redis_example_source IN LISTS _galay_redis_example_sources)
+    file(READ "${_galay_redis_example_source}" _galay_redis_example_content)
+    if(_galay_redis_example_content MATCHES "(^|[^A-Za-z0-9_])Coroutine([^A-Za-z0-9_]|$)")
+        message(FATAL_ERROR "galay-redis examples should expose Task<void>, not Coroutine: ${_galay_redis_example_source}")
+    endif()
+endforeach()
