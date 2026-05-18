@@ -2,7 +2,7 @@ project(test)
 
 file(GLOB SRC_LIST CONFIGURE_DEPENDS *.cc)
 
-set(GALAY_REDIS_TARGETS_FILE "${CMAKE_BINARY_DIR}/galay-redis/galay-redis-targets-build.cmake")
+set(GALAY_REDIS_TARGETS_FILE "${CMAKE_BINARY_DIR}/galay-redis/galayRedisConfigTargets-build.cmake")
 
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/interface/verify_interface.cmake.in

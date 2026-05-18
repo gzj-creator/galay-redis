@@ -1,7 +1,7 @@
 find_package(galay-kernel 4.0.0 CONFIG REQUIRED)
 find_package(galay-utils 2.0.0 CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_package(spdlog REQUIRED)
+find_path(GALAY_REDIS_SPDLOG_INCLUDE_DIR spdlog/spdlog.h REQUIRED)
 include(CMakePackageConfigHelpers)
 
 if(GALAY_REDIS_ENABLE_SSL)
@@ -99,7 +99,6 @@ set_property(TARGET ${PROJECT_NAME} PROPERTY NO_SYSTEM_FROM_IMPORTED ON)
 target_link_libraries(${PROJECT_NAME}
     PUBLIC
         galay-kernel::galay-kernel
-        spdlog::spdlog
     PRIVATE
         galay::galay-utils
         OpenSSL::SSL
@@ -120,6 +119,7 @@ target_include_directories(${PROJECT_NAME}
         ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${GALAY_REDIS_SPDLOG_INCLUDE_DIR}>
         $<INSTALL_INTERFACE:include>
 )
 
@@ -172,7 +172,7 @@ endif()
 
 export(
     EXPORT galay-redis-targets
-    FILE "${CMAKE_CURRENT_BINARY_DIR}/galay-redis-targets-build.cmake"
+    FILE "${CMAKE_CURRENT_BINARY_DIR}/galayRedisConfigTargets-build.cmake"
     NAMESPACE galay-redis::
 )
 
@@ -216,13 +216,13 @@ install(FILES
 
 if(CMAKE_CONFIGURATION_TYPES)
     install(EXPORT galay-redis-targets
-        FILE galay-redis-targets.cmake
+        FILE galayRedisConfigTargets.cmake
         NAMESPACE galay-redis::
         DESTINATION lib/cmake/galay-redis
     )
 else()
     install(EXPORT galay-redis-targets
-        FILE galay-redis-targets.cmake
+        FILE galayRedisConfigTargets.cmake
         NAMESPACE galay-redis::
         DESTINATION lib/cmake/galay-redis
         CONFIGURATIONS ${CMAKE_BUILD_TYPE}

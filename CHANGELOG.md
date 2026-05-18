@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+## [v2.0.3] - 2026-05-18
+
+### Changed
+- `spdlog` 从公开 CMake 链接依赖改为头文件 include 查找，`galay-redis` 不再导出 `spdlog::` link dependency。
+- 安装包 config 在消费端通过 `find_path` 补充 spdlog 头文件 include 路径，保持公开头文件可用。
+- 将安装导出的 CMake targets 文件改为 `galayRedisConfigTargets.cmake`，构建树导出文件改为 `galayRedisConfigTargets-build.cmake`，Release 安装生成 `galayRedisConfigTargets-release.cmake`。
+- 将 CMake project 版本提升到 `2.0.3`，对齐本次发布 tag。
+
+### Chore
+- 接口回归检查新增断言，禁止 `galay-redis` 再次导出 `spdlog::` 链接依赖。
+
+
 ## [v2.0.2] - 2026-05-17
 
 ### Fixed

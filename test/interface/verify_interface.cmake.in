@@ -25,6 +25,9 @@ if(_galay_link_match)
     if(_galay_link_string MATCHES "galay::galay-utils")
         message(FATAL_ERROR "galay-redis still exports galay-utils through INTERFACE_LINK_LIBRARIES")
     endif()
+    if(_galay_link_string MATCHES "spdlog::")
+        message(FATAL_ERROR "galay-redis still exports spdlog as a link dependency")
+    endif()
 endif()
 
 file(GLOB_RECURSE _galay_redis_example_sources
