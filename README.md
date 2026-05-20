@@ -39,7 +39,7 @@
 
 - CMake 最低版本：`3.20`
 - C++ 标准：`C++23`
-- 外部依赖：`OpenSSL`、`spdlog`
+- 外部依赖：`OpenSSL`
 - 内部依赖：`galay-kernel`、`galay-utils`
 - TLS 额外依赖：`galay-ssl`（当 `GALAY_REDIS_ENABLE_SSL=ON` 时）
 - 可选构建开关：`BUILD_EXAMPLES`、`BUILD_TESTING`、`BUILD_BENCHMARKS`、`GALAY_REDIS_ENABLE_SSL`
@@ -53,7 +53,7 @@ monorepo 联调时，推荐把共享前缀放在 `CMAKE_PREFIX_PATH` 首位：
 -DCMAKE_PREFIX_PATH=/Users/gongzhijie/Desktop/projects/git/.galay-prefix/latest
 ```
 
-当前 `galay-kernel` 对齐基线是 `3.4.4+`。
+当前 `galay-kernel` 对齐基线是 `5.0.0+`。
 
 `examples/`、`test/`、`benchmark/` 现在不再写死 `/usr/local/include` 或 `/opt/homebrew`。如果依赖安装在自定义前缀，请在配置阶段通过 `CMAKE_PREFIX_PATH`、`OpenSSL_ROOT_DIR` 或对应 package config 暴露它们。
 
@@ -101,7 +101,7 @@ find_package(galay-redis CONFIG REQUIRED)
 target_link_libraries(your_app PRIVATE galay-redis::galay-redis)
 ```
 
-如果 `galay-kernel`、`spdlog` 或可选的 `galay-ssl` 安装在自定义前缀，请把对应前缀加入 `CMAKE_PREFIX_PATH`。`galay-utils` 仍然是本仓库的构建依赖，但不再作为安装消费方必须显式重建的公开链接依赖。在源码树内联调时，也仍然可以使用 `add_subdirectory(...)`：
+如果 `galay-kernel` 或可选的 `galay-ssl` 安装在自定义前缀，请把对应前缀加入 `CMAKE_PREFIX_PATH`。`galay-utils` 仍然是本仓库的构建依赖，但不再作为安装消费方必须显式重建的公开链接依赖。在源码树内联调时，也仍然可以使用 `add_subdirectory(...)`：
 
 ```cmake
 add_subdirectory(external/galay-redis)

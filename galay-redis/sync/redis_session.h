@@ -21,8 +21,6 @@ namespace galay::redis
     public:
 
         RedisSession(RedisConfig config);
-        RedisSession(RedisConfig config, Logger::uptr logger);
-
         //redis://user:password@host:port/db_index
         std::expected<void, RedisError> connect(const std::string& url);
         std::expected<void, RedisError> connect(const std::string& ip, int32_t port, const std::string& username, const std::string& password);
@@ -198,7 +196,6 @@ namespace galay::redis
 
         ~RedisSession();
     private:
-        Logger::uptr m_logger;
         std::ostringstream m_stream;
         std::unique_ptr<protocol::Connection> m_connection;
         protocol::RespEncoder m_encoder;

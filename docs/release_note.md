@@ -49,3 +49,15 @@
   - `galay-redis-config.cmake` 在消费端通过 `find_path` 补充 spdlog 头文件 include 路径，保持公开日志头文件可消费。
   - 将安装导出的 CMake targets 文件改为 `galayRedisConfigTargets.cmake`，构建树导出文件改为 `galayRedisConfigTargets-build.cmake`，Release 安装生成 `galayRedisConfigTargets-release.cmake`。
   - 接口回归检查新增 `spdlog::` 链接导出断言，并将 CMake project 版本提升到 `2.0.3`。
+
+## v2.1.0 - 2026-05-20
+
+- 版本级别：中版本（minor）
+- Git 提交消息：`feat: 增加 redis 库级 BaseLogger 日志入口`
+- Git Tag：`v2.1.0`
+- 自述摘要：
+  - 新增 `galay::redis::log::set/get` 库级日志入口，使用 `galay-kernel` 的 `BaseLogger` 和独立 logger 槽位，允许用户只启用 galay-redis 日志。
+  - 新增 `REDIS_LOG_*` 埋点宏，并在 async 客户端、TLS 客户端、连接池和遗留同步会话路径补充日志埋点。
+  - 移除旧的 `spdlog` / `RedisLog` / `setLogger` / `logger()` 公开日志入口，Redis 日志统一改为库级 `BaseLogger` 注入模型。
+  - 新增 `t26_log` 回归测试，验证未设置 logger 和日志级别过滤时不会求值日志格式化参数。
+  - 将 `galay-kernel` 依赖提升到 `5.0.0`，将 TLS 路径的 `galay-ssl` 依赖提升到 `2.1.0`，并同步 CMake project/package 版本到 `2.1.0`。

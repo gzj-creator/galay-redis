@@ -372,8 +372,6 @@ namespace galay::redis
                 if (!buffer_provider) {
                     buffer_provider = std::make_shared<RedisRingBufferProvider>(config.buffer_size);
                 }
-                logger = RedisLog::getInstance()->getLogger();
-
                 if (!ssl_context.isValid()) {
                     boot_error = RedisError(
                         RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
@@ -437,8 +435,7 @@ namespace galay::redis
                 if (!server_name.empty()) {
                     const auto sni_result = socket->setHostname(std::string(server_name));
                     if (!sni_result) {
-                        RedisLogWarn(logger,
-                                     "Failed to set TLS SNI to {}: {}",
+                        REDIS_LOG_WARN("[client]", "Failed to set TLS SNI to {}: {}",
                                      server_name,
                                      sni_result.error().message());
                     }
@@ -467,7 +464,6 @@ namespace galay::redis
             RedissClientConfig tls_config;
             std::shared_ptr<RedisBufferProvider> buffer_provider;
             TcpSocket ready_socket;
-            RedisLoggerPtr logger;
             protocol::RespParser parser;
             bool is_closed = true;
             std::optional<RedisError> boot_error;
@@ -490,7 +486,6 @@ namespace galay::redis
                 if (!buffer_provider) {
                     buffer_provider = std::make_shared<RedisRingBufferProvider>(config.buffer_size);
                 }
-                logger = RedisLog::getInstance()->getLogger();
                 boot_error = RedisError(
                     RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
                     "galay-redis was built without SSL support");
@@ -508,7 +503,6 @@ namespace galay::redis
             RedissClientConfig tls_config;
             std::shared_ptr<RedisBufferProvider> buffer_provider;
             TcpSocket ready_socket;
-            RedisLoggerPtr logger;
             bool is_closed = true;
             std::optional<RedisError> boot_error;
         };
@@ -1326,16 +1320,6 @@ namespace galay::redis
                 RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR,
                 "galay-redis was built without SSL support")));
 #endif
-    }
-
-    RedisLoggerPtr& RedissClient::logger()
-    {
-        return m_impl->logger;
-    }
-
-    void RedissClient::setLogger(RedisLoggerPtr logger)
-    {
-        m_impl->logger = std::move(logger);
     }
 
     const AsyncRedisConfig& RedissClient::asyncConfig() const

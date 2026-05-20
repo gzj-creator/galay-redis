@@ -29,7 +29,7 @@
 | `galay-redis/base/redis_base.h` | `KVPair`、`KeyType`、`ValType`、`ScoreValType` | 显式导出 | 基础 concepts |
 | `galay-redis/base/redis_config.h` | `RedisConnectionOption`、`RedisConfig` | 显式导出 | 同步连接配置 |
 | `galay-redis/base/redis_error.h` | `RedisErrorType`、`RedisErrorCode`、`RedisError` | 显式导出 | 统一错误对象 |
-| `galay-redis/base/redis_log.h` | `RedisLoggerPtr`、`RedisLog`、日志宏 | 间接可见 | 由 `redis_client.h` 引入 |
+| `galay-redis/base/redis_log.h` | `galay::redis::log::set/get`、`REDIS_LOG_*` | 间接可见 | 由 `redis_client.h` 引入 |
 | `galay-redis/base/redis_value.h` | `RedisValue`、`RedisAsyncValue` | 显式导出 | async / sync 共用值包装 |
 | `galay-redis/protocol/redis_protocol.h` | `RespType`、`RespData`、`RedisReply`、`RespParser`、`RespEncoder` | 显式导出 | RESP2 / RESP3 解析与编码 |
 | `galay-redis/protocol/connection.h` | `protocol::Connection` | 显式导出 | 同步 TCP 封装 |
@@ -118,27 +118,23 @@
 
 当前 async 与 sync 路径的 `std::expected<..., RedisError>` 都以这里为统一错误对象。
 
-## `RedisLog`
+## Redis 日志入口
 
 头文件：`galay-redis/base/redis_log.h`
 
-公开类型与入口：
+公开入口：
 
-- `using RedisLoggerPtr = std::shared_ptr<spdlog::logger>`
-- `class RedisLog`
-- 日志宏：`RedisLogTrace`、`RedisLogDebug`、`RedisLogInfo`、`RedisLogWarn`、`RedisLogError`、`RedisLogCritical`
+- `galay::redis::log::set(galay::kernel::BaseLogger::uptr logger)`
+- `galay::redis::log::get() -> galay::kernel::BaseLogger*`
+- 日志宏：`REDIS_LOG_ENABLED`、`REDIS_LOG_TRACE`、`REDIS_LOG_DEBUG`、`REDIS_LOG_INFO`、`REDIS_LOG_WARN`、`REDIS_LOG_ERROR`、`REDIS_LOG_CRITICAL`
 
-`RedisLog` 真实公开方法：
+语义要点：
 
-- `enable()`
-- `console()`
-- `console(const std::string& logger_name)`
-- `file(const std::string& log_file_path, const std::string& logger_name, bool truncate = false)`
-- `disable()`
-- `setLogger(RedisLoggerPtr logger)`
-- `RedisLoggerPtr getLogger() const`
-
-`RedisClient` 与 `RedisConnectionPool` 都公开了 `setLogger(...)` / `logger()` 入口，因此这组类型属于实际公共表面的一部分。
+- `set()` 只影响 `REDIS_LOG_*` 宏产生的 galay-redis 日志，不会启用 kernel、ssl、http 或其他 galay 库日志
+- 传入 `nullptr` 等价于禁用 galay-redis 日志
+- logger 的所有权通过 `std::unique_ptr<BaseLogger>` 转移给库级槽位，`get()` 返回的裸指针不得由调用方释放
+- 未设置 logger 或日志级别被 `minLevel()` 过滤时，日志宏不会执行 `std::format`，也不会求值格式化参数
+- 推荐在创建 `RedisClient`、`RedissClient`、`RedisConnectionPool` 或 `RedissConnectionPool` 之前的单线程初始化阶段调用 `set()`
 
 ## `AsyncRedisConfig`
 
@@ -285,7 +281,6 @@
 | `batchBorrowed(const std::string&, size_t expected_replies)` | `std::expected<std::optional<std::vector<RedisValue>>, RedisError>` | plain 内部预编码 pipeline 快路径；`std::string&&` / `std::string_view` 重载已删除 |
 | `close()` | `galay::kernel::CloseAwaitable` | 关闭连接 |
 | `isClosed()` | `bool` | 查询连接状态 |
-| `setLogger(...)` / `logger()` | logger 管理 | 可选日志注入 |
 
 覆盖来源：
 
@@ -371,7 +366,6 @@
 | `cleanupUnhealthyConnections()` | 移除不健康连接 | `conn_pool.h` |
 | `getStats()` | 统计信息 | `test/t4_pool.cc`、`benchmark/b2_pool.cc` |
 | `getConfig()` | 读取当前配置 | `conn_pool.h` |
-| `setLogger(...)` / `logger()` | logger 管理 | `conn_pool.h` |
 | `shutdown()` | 同步关闭连接池 | `test/t4_pool.cc` |
 | `ScopedConnection` | RAII 封装 | `conn_pool.h` |
 

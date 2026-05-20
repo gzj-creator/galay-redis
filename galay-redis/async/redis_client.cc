@@ -657,7 +657,6 @@ namespace galay::redis
         if (!m_buffer_provider) {
             m_buffer_provider = std::make_shared<RedisRingBufferProvider>(config.buffer_size);
         }
-        m_logger = RedisLog::getInstance()->getLogger();
     }
 
     RedisClient::RedisClient(RedisClient&& other) noexcept
@@ -667,7 +666,6 @@ namespace galay::redis
         , m_parser(std::move(other.m_parser))
         , m_config(other.m_config)
         , m_buffer_provider(std::move(other.m_buffer_provider))
-        , m_logger(std::move(other.m_logger))
     {
         other.m_is_closed = true;
     }
@@ -681,7 +679,6 @@ namespace galay::redis
             m_parser = std::move(other.m_parser);
             m_config = other.m_config;
             m_buffer_provider = std::move(other.m_buffer_provider);
-            m_logger = std::move(other.m_logger);
             other.m_is_closed = true;
         }
         return *this;
@@ -773,7 +770,7 @@ namespace galay::redis
                 try {
                     port = std::stoi(matches[4]);
                 } catch (const std::exception& e) {
-                    RedisLogWarn(m_logger, "Failed to parse port from URL, using default 6379: {}", e.what());
+                    REDIS_LOG_WARN("[client]", "Failed to parse port from URL, using default 6379: {}", e.what());
                     port = 6379;
                 }
             }
@@ -781,7 +778,7 @@ namespace galay::redis
                 try {
                     db_index = std::stoi(matches[5]);
                 } catch (const std::exception& e) {
-                    RedisLogWarn(m_logger, "Failed to parse db_index from URL, using default 0: {}", e.what());
+                    REDIS_LOG_WARN("[client]", "Failed to parse db_index from URL, using default 0: {}", e.what());
                     db_index = 0;
                 }
             }

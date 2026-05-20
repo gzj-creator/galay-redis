@@ -2,19 +2,13 @@
 
 include(CMakeFindDependencyMacro)
 
-find_dependency(galay-kernel 4.0.0 REQUIRED CONFIG)
-find_path(GALAY_REDIS_SPDLOG_INCLUDE_DIR spdlog/spdlog.h REQUIRED)
+find_dependency(galay-kernel 5.0.0 REQUIRED CONFIG)
 
 set(GALAY_REDIS_ENABLE_SSL @GALAY_REDIS_ENABLE_SSL@)
 if(GALAY_REDIS_ENABLE_SSL)
-    find_dependency(galay-ssl 2.0.0 REQUIRED CONFIG)
+    find_dependency(galay-ssl 2.1.0 REQUIRED CONFIG)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/galayRedisConfigTargets.cmake")
-
-if(TARGET galay-redis::galay-redis)
-    set_property(TARGET galay-redis::galay-redis APPEND PROPERTY
-        INTERFACE_INCLUDE_DIRECTORIES "${GALAY_REDIS_SPDLOG_INCLUDE_DIR}")
-endif()
 
 check_required_components(galay-redis)

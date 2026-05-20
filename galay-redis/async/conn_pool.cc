@@ -56,9 +56,7 @@ namespace galay::redis
             throw std::invalid_argument("Invalid connection pool configuration");
         }
 
-        m_logger = RedisLog::getInstance()->getLogger();
-
-        RedisLogInfo(m_logger, "Connection pool created: host={}:{}, min={}, max={}, initial={}",
+        REDIS_LOG_INFO("[client]", "Connection pool created: host={}:{}, min={}, max={}, initial={}",
                      m_config.host, m_config.port,
                      m_config.min_connections, m_config.max_connections,
                      m_config.initial_connections);
@@ -67,7 +65,7 @@ namespace galay::redis
     RedisConnectionPool::~RedisConnectionPool()
     {
         if (m_is_initialized && !m_is_shutting_down) {
-            RedisLogWarn(m_logger, "Connection pool destroyed without proper shutdown");
+            REDIS_LOG_WARN("[client]", "Connection pool destroyed without proper shutdown");
             shutdown();
         }
     }
@@ -99,7 +97,7 @@ namespace galay::redis
         while (created_count < m_config.initial_connections) {
             auto result = getConnectionSync();
             if (!result) {
-                RedisLogError(m_logger, "Failed to create connection {}/{}: {}",
+                REDIS_LOG_ERROR("[client]", "Failed to create connection {}/{}: {}",
                               created_count + 1, m_config.initial_connections,
                               result.error().message());
                 break;
@@ -120,7 +118,7 @@ namespace galay::redis
         }
 
         m_is_initialized = true;
-        RedisLogInfo(m_logger, "Connection pool initialized with {} connections", created_count);
+        REDIS_LOG_INFO("[client]", "Connection pool initialized with {} connections", created_count);
         return {};
     }
 
@@ -192,11 +190,11 @@ namespace galay::redis
                     std::lock_guard<std::mutex> stats_lock(m_mutex);
                     total_connections = m_all_connections.size();
                 }
-                RedisLogDebug(m_logger, "Created and acquired new connection, total: {}", total_connections);
+                REDIS_LOG_DEBUG("[client]", "Created and acquired new connection, total: {}", total_connections);
                 return conn;
             }
 
-            RedisLogWarn(m_logger, "Failed to create new connection: {}", result.error().message());
+            REDIS_LOG_WARN("[client]", "Failed to create new connection: {}", result.error().message());
             return std::unexpected(result.error());
         }
 
@@ -239,7 +237,7 @@ namespace galay::redis
         }
 
         if (m_is_shutting_down) {
-            RedisLogDebug(m_logger, "Connection released during shutdown, will be destroyed");
+            REDIS_LOG_DEBUG("[client]", "Connection released during shutdown, will be destroyed");
             return;
         }
 
@@ -247,7 +245,7 @@ namespace galay::redis
 
         // 检查连接是否健康
         if (conn->isClosed() || !conn->isHealthy()) {
-            RedisLogWarn(m_logger, "Unhealthy connection released, removing from pool");
+            REDIS_LOG_WARN("[client]", "Unhealthy connection released, removing from pool");
             auto it = std::find(m_all_connections.begin(), m_all_connections.end(), conn);
             if (it != m_all_connections.end()) {
                 m_all_connections.erase(it);
@@ -258,7 +256,7 @@ namespace galay::redis
 
         // 如果连接数超过最大值，销毁连接
         if (m_all_connections.size() > m_config.max_connections) {
-            RedisLogDebug(m_logger, "Pool size exceeds max, destroying connection");
+            REDIS_LOG_DEBUG("[client]", "Pool size exceeds max, destroying connection");
             auto it = std::find(m_all_connections.begin(), m_all_connections.end(), conn);
             if (it != m_all_connections.end()) {
                 m_all_connections.erase(it);
@@ -271,7 +269,7 @@ namespace galay::redis
         m_available_connections.push(conn);
         m_total_released++;
 
-        RedisLogDebug(m_logger, "Connection released to pool, available: {}, total: {}",
+        REDIS_LOG_DEBUG("[client]", "Connection released to pool, available: {}, total: {}",
                      m_available_connections.size(), m_all_connections.size());
 
         m_cv.notify_one();
@@ -280,13 +278,13 @@ namespace galay::redis
     std::expected<std::shared_ptr<PooledConnection>, RedisError>
     RedisConnectionPool::getConnectionSync()
     {
-        RedisLogDebug(m_logger, "Creating new connection to {}:{}", m_config.host, m_config.port);
+        REDIS_LOG_DEBUG("[client]", "Creating new connection to {}:{}", m_config.host, m_config.port);
 
         // 带重试的连接创建
         for (int attempt = 0; attempt < m_config.max_reconnect_attempts; ++attempt) {
             if (attempt > 0) {
                 m_reconnect_attempts++;
-                RedisLogInfo(m_logger, "Reconnect attempt {}/{} for {}:{}",
+                REDIS_LOG_INFO("[client]", "Reconnect attempt {}/{} for {}:{}",
                             attempt + 1, m_config.max_reconnect_attempts,
                             m_config.host, m_config.port);
             }
@@ -307,15 +305,15 @@ namespace galay::redis
 
                 if (attempt > 0) {
                     m_reconnect_successes++;
-                    RedisLogInfo(m_logger, "Reconnect succeeded on attempt {}", attempt + 1);
+                    REDIS_LOG_INFO("[client]", "Reconnect succeeded on attempt {}", attempt + 1);
                 }
 
-                RedisLogDebug(m_logger, "Connection created successfully, total: {}",
+                REDIS_LOG_DEBUG("[client]", "Connection created successfully, total: {}",
                              m_all_connections.size());
                 return conn;
 
             } catch (const std::exception& e) {
-                RedisLogError(m_logger, "Failed to create connection (attempt {}): {}",
+                REDIS_LOG_ERROR("[client]", "Failed to create connection (attempt {}): {}",
                              attempt + 1, e.what());
 
                 if (attempt == m_config.max_reconnect_attempts - 1) {
@@ -352,7 +350,7 @@ namespace galay::redis
             return;
         }
 
-        RedisLogInfo(m_logger, "Running health check on {} connections", m_all_connections.size());
+        REDIS_LOG_INFO("[client]", "Running health check on {} connections", m_all_connections.size());
 
         std::vector<std::shared_ptr<PooledConnection>> unhealthy_connections;
 
@@ -386,7 +384,7 @@ namespace galay::redis
 
                 m_total_destroyed += unhealthy_connections.size();
 
-                RedisLogWarn(m_logger, "Removed {} unhealthy connections, remaining: {}",
+                REDIS_LOG_WARN("[client]", "Removed {} unhealthy connections, remaining: {}",
                             unhealthy_connections.size(), m_all_connections.size());
             }
         }
@@ -396,7 +394,7 @@ namespace galay::redis
         while (current_size < m_config.min_connections) {
             auto result = getConnectionSync();
             if (!result) {
-                RedisLogError(m_logger, "Failed to create replacement connection: {}",
+                REDIS_LOG_ERROR("[client]", "Failed to create replacement connection: {}",
                              result.error().message());
                 break;
             }
@@ -408,13 +406,13 @@ namespace galay::redis
                 current_size = m_all_connections.size();
             }
 
-            RedisLogInfo(m_logger, "Created replacement connection, total: {}", current_size);
+            REDIS_LOG_INFO("[client]", "Created replacement connection, total: {}", current_size);
         }
     }
 
     void RedisConnectionPool::triggerIdleCleanup()
     {
-        RedisLogInfo(m_logger, "Running idle connection cleanup");
+        REDIS_LOG_INFO("[client]", "Running idle connection cleanup");
 
         std::vector<std::shared_ptr<PooledConnection>> idle_connections;
 
@@ -448,14 +446,14 @@ namespace galay::redis
                 }
             }
 
-            RedisLogInfo(m_logger, "Cleaned up {} idle connections, remaining: {}",
+            REDIS_LOG_INFO("[client]", "Cleaned up {} idle connections, remaining: {}",
                         idle_connections.size(), m_all_connections.size());
         }
     }
 
     void RedisConnectionPool::warmup()
     {
-        RedisLogInfo(m_logger, "Warming up connection pool to {} connections", m_config.min_connections);
+        REDIS_LOG_INFO("[client]", "Warming up connection pool to {} connections", m_config.min_connections);
 
         size_t current_size;
         {
@@ -467,7 +465,7 @@ namespace galay::redis
         while (current_size < m_config.min_connections) {
             auto result = getConnectionSync();
             if (!result) {
-                RedisLogError(m_logger, "Failed to create warmup connection: {}", result.error().message());
+                REDIS_LOG_ERROR("[client]", "Failed to create warmup connection: {}", result.error().message());
                 break;
             }
 
@@ -480,12 +478,12 @@ namespace galay::redis
             created++;
         }
 
-        RedisLogInfo(m_logger, "Warmup complete, created {} connections, total: {}", created, current_size);
+        REDIS_LOG_INFO("[client]", "Warmup complete, created {} connections, total: {}", created, current_size);
     }
 
     size_t RedisConnectionPool::cleanupUnhealthyConnections()
     {
-        RedisLogInfo(m_logger, "Cleaning up unhealthy connections");
+        REDIS_LOG_INFO("[client]", "Cleaning up unhealthy connections");
 
         std::vector<std::shared_ptr<PooledConnection>> unhealthy_connections;
 
@@ -524,7 +522,7 @@ namespace galay::redis
 
         size_t removed = unhealthy_connections.size();
         if (removed > 0) {
-            RedisLogInfo(m_logger, "Cleaned up {} unhealthy connections, remaining: {}",
+            REDIS_LOG_INFO("[client]", "Cleaned up {} unhealthy connections, remaining: {}",
                         removed, m_all_connections.size());
         }
 
@@ -537,7 +535,7 @@ namespace galay::redis
             return 0;
         }
 
-        RedisLogInfo(m_logger, "Expanding pool by {} connections", count);
+        REDIS_LOG_INFO("[client]", "Expanding pool by {} connections", count);
 
         size_t created = 0;
         for (size_t i = 0; i < count; ++i) {
@@ -549,13 +547,13 @@ namespace galay::redis
 
             // 检查是否超过最大连接数
             if (current_size >= m_config.max_connections) {
-                RedisLogWarn(m_logger, "Cannot expand pool: reached max connections ({})", m_config.max_connections);
+                REDIS_LOG_WARN("[client]", "Cannot expand pool: reached max connections ({})", m_config.max_connections);
                 break;
             }
 
             auto result = getConnectionSync();
             if (!result) {
-                RedisLogError(m_logger, "Failed to create connection during expansion: {}",
+                REDIS_LOG_ERROR("[client]", "Failed to create connection during expansion: {}",
                              result.error().message());
                 break;
             }
@@ -568,14 +566,14 @@ namespace galay::redis
             created++;
         }
 
-        RedisLogInfo(m_logger, "Pool expansion complete, created {} connections, total: {}",
+        REDIS_LOG_INFO("[client]", "Pool expansion complete, created {} connections, total: {}",
                      created, m_all_connections.size());
         return created;
     }
 
     size_t RedisConnectionPool::shrinkPool(size_t target_size)
     {
-        RedisLogInfo(m_logger, "Shrinking pool to {} connections", target_size);
+        REDIS_LOG_INFO("[client]", "Shrinking pool to {} connections", target_size);
 
         std::vector<std::shared_ptr<PooledConnection>> connections_to_remove;
 
@@ -585,12 +583,12 @@ namespace galay::redis
             // 确保不低于最小连接数
             if (target_size < m_config.min_connections) {
                 target_size = m_config.min_connections;
-                RedisLogWarn(m_logger, "Target size adjusted to min_connections: {}", target_size);
+                REDIS_LOG_WARN("[client]", "Target size adjusted to min_connections: {}", target_size);
             }
 
             // 如果当前连接数已经小于等于目标，不需要缩容
             if (m_all_connections.size() <= target_size) {
-                RedisLogInfo(m_logger, "Current size ({}) <= target size ({}), no shrink needed",
+                REDIS_LOG_INFO("[client]", "Current size ({}) <= target size ({}), no shrink needed",
                             m_all_connections.size(), target_size);
                 return 0;
             }
@@ -624,7 +622,7 @@ namespace galay::redis
         }
 
         size_t removed = connections_to_remove.size();
-        RedisLogInfo(m_logger, "Pool shrink complete, removed {} connections, remaining: {}",
+        REDIS_LOG_INFO("[client]", "Pool shrink complete, removed {} connections, remaining: {}",
                      removed, m_all_connections.size());
         return removed;
     }
@@ -636,7 +634,7 @@ namespace galay::redis
         }
 
         m_is_shutting_down = true;
-        RedisLogInfo(m_logger, "Shutting down connection pool");
+        REDIS_LOG_INFO("[client]", "Shutting down connection pool");
 
         std::vector<std::shared_ptr<PooledConnection>> all_connections;
 
@@ -652,7 +650,7 @@ namespace galay::redis
         }
 
         m_is_initialized = false;
-        RedisLogInfo(m_logger, "Connection pool shutdown complete, closed {} connections",
+        REDIS_LOG_INFO("[client]", "Connection pool shutdown complete, closed {} connections",
                      all_connections.size());
     }
 
@@ -734,9 +732,7 @@ namespace galay::redis
             throw std::invalid_argument("Invalid TLS connection pool configuration");
         }
 
-        m_logger = RedisLog::getInstance()->getLogger();
-
-        RedisLogInfo(m_logger, "TLS connection pool created: host={}:{}, min={}, max={}, initial={}",
+        REDIS_LOG_INFO("[client]", "TLS connection pool created: host={}:{}, min={}, max={}, initial={}",
                      m_config.host, m_config.port,
                      m_config.min_connections, m_config.max_connections,
                      m_config.initial_connections);
@@ -745,7 +741,7 @@ namespace galay::redis
     RedissConnectionPool::~RedissConnectionPool()
     {
         if (m_is_initialized && !m_is_shutting_down) {
-            RedisLogWarn(m_logger, "TLS connection pool destroyed without proper shutdown");
+            REDIS_LOG_WARN("[client]", "TLS connection pool destroyed without proper shutdown");
             shutdown();
         }
     }
@@ -777,7 +773,7 @@ namespace galay::redis
         while (created_count < m_config.initial_connections) {
             auto result = getConnectionSync();
             if (!result) {
-                RedisLogError(m_logger, "Failed to create TLS connection {}/{}: {}",
+                REDIS_LOG_ERROR("[client]", "Failed to create TLS connection {}/{}: {}",
                               created_count + 1, m_config.initial_connections,
                               result.error().message());
                 break;
@@ -798,7 +794,7 @@ namespace galay::redis
         }
 
         m_is_initialized = true;
-        RedisLogInfo(m_logger, "TLS connection pool initialized with {} connections", created_count);
+        REDIS_LOG_INFO("[client]", "TLS connection pool initialized with {} connections", created_count);
         return {};
     }
 
@@ -870,11 +866,11 @@ namespace galay::redis
                     std::lock_guard<std::mutex> stats_lock(m_mutex);
                     total_connections = m_all_connections.size();
                 }
-                RedisLogDebug(m_logger, "Created and acquired new TLS connection, total: {}", total_connections);
+                REDIS_LOG_DEBUG("[client]", "Created and acquired new TLS connection, total: {}", total_connections);
                 return conn;
             }
 
-            RedisLogWarn(m_logger, "Failed to create new TLS connection: {}", result.error().message());
+            REDIS_LOG_WARN("[client]", "Failed to create new TLS connection: {}", result.error().message());
             return std::unexpected(result.error());
         }
 
@@ -917,14 +913,14 @@ namespace galay::redis
         }
 
         if (m_is_shutting_down) {
-            RedisLogDebug(m_logger, "TLS connection released during shutdown, will be destroyed");
+            REDIS_LOG_DEBUG("[client]", "TLS connection released during shutdown, will be destroyed");
             return;
         }
 
         std::lock_guard<std::mutex> lock(m_mutex);
 
         if (conn->isClosed() || !conn->isHealthy()) {
-            RedisLogWarn(m_logger, "Unhealthy TLS connection released, removing from pool");
+            REDIS_LOG_WARN("[client]", "Unhealthy TLS connection released, removing from pool");
             auto it = std::find(m_all_connections.begin(), m_all_connections.end(), conn);
             if (it != m_all_connections.end()) {
                 m_all_connections.erase(it);
@@ -934,7 +930,7 @@ namespace galay::redis
         }
 
         if (m_all_connections.size() > m_config.max_connections) {
-            RedisLogDebug(m_logger, "TLS pool size exceeds max, destroying connection");
+            REDIS_LOG_DEBUG("[client]", "TLS pool size exceeds max, destroying connection");
             auto it = std::find(m_all_connections.begin(), m_all_connections.end(), conn);
             if (it != m_all_connections.end()) {
                 m_all_connections.erase(it);
@@ -946,7 +942,7 @@ namespace galay::redis
         m_available_connections.push(conn);
         m_total_released++;
 
-        RedisLogDebug(m_logger, "TLS connection released to pool, available: {}, total: {}",
+        REDIS_LOG_DEBUG("[client]", "TLS connection released to pool, available: {}, total: {}",
                       m_available_connections.size(), m_all_connections.size());
 
         m_cv.notify_one();
@@ -955,12 +951,12 @@ namespace galay::redis
     std::expected<std::shared_ptr<PooledRedissConnection>, RedisError>
     RedissConnectionPool::getConnectionSync()
     {
-        RedisLogDebug(m_logger, "Creating new TLS connection to {}:{}", m_config.host, m_config.port);
+        REDIS_LOG_DEBUG("[client]", "Creating new TLS connection to {}:{}", m_config.host, m_config.port);
 
         for (int attempt = 0; attempt < m_config.max_reconnect_attempts; ++attempt) {
             if (attempt > 0) {
                 m_reconnect_attempts++;
-                RedisLogInfo(m_logger, "TLS reconnect attempt {}/{} for {}:{}",
+                REDIS_LOG_INFO("[client]", "TLS reconnect attempt {}/{} for {}:{}",
                              attempt + 1, m_config.max_reconnect_attempts,
                              m_config.host, m_config.port);
             }
@@ -984,15 +980,15 @@ namespace galay::redis
 
                 if (attempt > 0) {
                     m_reconnect_successes++;
-                    RedisLogInfo(m_logger, "TLS reconnect succeeded on attempt {}", attempt + 1);
+                    REDIS_LOG_INFO("[client]", "TLS reconnect succeeded on attempt {}", attempt + 1);
                 }
 
-                RedisLogDebug(m_logger, "TLS connection created successfully, total: {}",
+                REDIS_LOG_DEBUG("[client]", "TLS connection created successfully, total: {}",
                               m_all_connections.size());
                 return conn;
 
             } catch (const std::exception& e) {
-                RedisLogError(m_logger, "Failed to create TLS connection (attempt {}): {}",
+                REDIS_LOG_ERROR("[client]", "Failed to create TLS connection (attempt {}): {}",
                               attempt + 1, e.what());
 
                 if (attempt == m_config.max_reconnect_attempts - 1) {
@@ -1026,7 +1022,7 @@ namespace galay::redis
             return;
         }
 
-        RedisLogInfo(m_logger, "Running TLS health check on {} connections", m_all_connections.size());
+        REDIS_LOG_INFO("[client]", "Running TLS health check on {} connections", m_all_connections.size());
 
         std::vector<std::shared_ptr<PooledRedissConnection>> unhealthy_connections;
 
@@ -1058,7 +1054,7 @@ namespace galay::redis
 
                 m_total_destroyed += unhealthy_connections.size();
 
-                RedisLogWarn(m_logger, "Removed {} unhealthy TLS connections, remaining: {}",
+                REDIS_LOG_WARN("[client]", "Removed {} unhealthy TLS connections, remaining: {}",
                              unhealthy_connections.size(), m_all_connections.size());
             }
         }
@@ -1067,7 +1063,7 @@ namespace galay::redis
         while (current_size < m_config.min_connections) {
             auto result = getConnectionSync();
             if (!result) {
-                RedisLogError(m_logger, "Failed to create replacement TLS connection: {}",
+                REDIS_LOG_ERROR("[client]", "Failed to create replacement TLS connection: {}",
                               result.error().message());
                 break;
             }
@@ -1078,13 +1074,13 @@ namespace galay::redis
                 current_size = m_all_connections.size();
             }
 
-            RedisLogInfo(m_logger, "Created replacement TLS connection, total: {}", current_size);
+            REDIS_LOG_INFO("[client]", "Created replacement TLS connection, total: {}", current_size);
         }
     }
 
     void RedissConnectionPool::triggerIdleCleanup()
     {
-        RedisLogInfo(m_logger, "Running TLS idle connection cleanup");
+        REDIS_LOG_INFO("[client]", "Running TLS idle connection cleanup");
 
         std::vector<std::shared_ptr<PooledRedissConnection>> idle_connections;
 
@@ -1116,14 +1112,14 @@ namespace galay::redis
                 }
             }
 
-            RedisLogInfo(m_logger, "Cleaned up {} idle TLS connections, remaining: {}",
+            REDIS_LOG_INFO("[client]", "Cleaned up {} idle TLS connections, remaining: {}",
                          idle_connections.size(), m_all_connections.size());
         }
     }
 
     void RedissConnectionPool::warmup()
     {
-        RedisLogInfo(m_logger, "Warming up TLS connection pool to {} connections", m_config.min_connections);
+        REDIS_LOG_INFO("[client]", "Warming up TLS connection pool to {} connections", m_config.min_connections);
 
         size_t current_size;
         {
@@ -1135,7 +1131,7 @@ namespace galay::redis
         while (current_size < m_config.min_connections) {
             auto result = getConnectionSync();
             if (!result) {
-                RedisLogError(m_logger, "Failed to create warmup TLS connection: {}",
+                REDIS_LOG_ERROR("[client]", "Failed to create warmup TLS connection: {}",
                               result.error().message());
                 break;
             }
@@ -1148,12 +1144,12 @@ namespace galay::redis
             created++;
         }
 
-        RedisLogInfo(m_logger, "TLS warmup complete, created {} connections, total: {}", created, current_size);
+        REDIS_LOG_INFO("[client]", "TLS warmup complete, created {} connections, total: {}", created, current_size);
     }
 
     size_t RedissConnectionPool::cleanupUnhealthyConnections()
     {
-        RedisLogInfo(m_logger, "Cleaning up unhealthy TLS connections");
+        REDIS_LOG_INFO("[client]", "Cleaning up unhealthy TLS connections");
 
         std::vector<std::shared_ptr<PooledRedissConnection>> unhealthy_connections;
 
@@ -1189,7 +1185,7 @@ namespace galay::redis
 
         size_t removed = unhealthy_connections.size();
         if (removed > 0) {
-            RedisLogInfo(m_logger, "Cleaned up {} unhealthy TLS connections, remaining: {}",
+            REDIS_LOG_INFO("[client]", "Cleaned up {} unhealthy TLS connections, remaining: {}",
                          removed, m_all_connections.size());
         }
 
@@ -1202,7 +1198,7 @@ namespace galay::redis
             return 0;
         }
 
-        RedisLogInfo(m_logger, "Expanding TLS pool by {} connections", count);
+        REDIS_LOG_INFO("[client]", "Expanding TLS pool by {} connections", count);
 
         size_t created = 0;
         for (size_t i = 0; i < count; ++i) {
@@ -1213,13 +1209,13 @@ namespace galay::redis
             }
 
             if (current_size >= m_config.max_connections) {
-                RedisLogWarn(m_logger, "Cannot expand TLS pool: reached max connections ({})", m_config.max_connections);
+                REDIS_LOG_WARN("[client]", "Cannot expand TLS pool: reached max connections ({})", m_config.max_connections);
                 break;
             }
 
             auto result = getConnectionSync();
             if (!result) {
-                RedisLogError(m_logger, "Failed to create TLS connection during expansion: {}",
+                REDIS_LOG_ERROR("[client]", "Failed to create TLS connection during expansion: {}",
                               result.error().message());
                 break;
             }
@@ -1231,14 +1227,14 @@ namespace galay::redis
             created++;
         }
 
-        RedisLogInfo(m_logger, "TLS pool expansion complete, created {} connections, total: {}",
+        REDIS_LOG_INFO("[client]", "TLS pool expansion complete, created {} connections, total: {}",
                      created, m_all_connections.size());
         return created;
     }
 
     size_t RedissConnectionPool::shrinkPool(size_t target_size)
     {
-        RedisLogInfo(m_logger, "Shrinking TLS pool to {} connections", target_size);
+        REDIS_LOG_INFO("[client]", "Shrinking TLS pool to {} connections", target_size);
 
         std::vector<std::shared_ptr<PooledRedissConnection>> connections_to_remove;
 
@@ -1247,11 +1243,11 @@ namespace galay::redis
 
             if (target_size < m_config.min_connections) {
                 target_size = m_config.min_connections;
-                RedisLogWarn(m_logger, "TLS target size adjusted to min_connections: {}", target_size);
+                REDIS_LOG_WARN("[client]", "TLS target size adjusted to min_connections: {}", target_size);
             }
 
             if (m_all_connections.size() <= target_size) {
-                RedisLogInfo(m_logger, "Current TLS size ({}) <= target size ({}), no shrink needed",
+                REDIS_LOG_INFO("[client]", "Current TLS size ({}) <= target size ({}), no shrink needed",
                              m_all_connections.size(), target_size);
                 return 0;
             }
@@ -1282,7 +1278,7 @@ namespace galay::redis
         }
 
         size_t removed = connections_to_remove.size();
-        RedisLogInfo(m_logger, "TLS pool shrink complete, removed {} connections, remaining: {}",
+        REDIS_LOG_INFO("[client]", "TLS pool shrink complete, removed {} connections, remaining: {}",
                      removed, m_all_connections.size());
         return removed;
     }
@@ -1294,7 +1290,7 @@ namespace galay::redis
         }
 
         m_is_shutting_down = true;
-        RedisLogInfo(m_logger, "Shutting down TLS connection pool");
+        REDIS_LOG_INFO("[client]", "Shutting down TLS connection pool");
 
         std::vector<std::shared_ptr<PooledRedissConnection>> all_connections;
 
@@ -1309,7 +1305,7 @@ namespace galay::redis
         }
 
         m_is_initialized = false;
-        RedisLogInfo(m_logger, "TLS connection pool shutdown complete, closed {} connections",
+        REDIS_LOG_INFO("[client]", "TLS connection pool shutdown complete, closed {} connections",
                      all_connections.size());
     }
 

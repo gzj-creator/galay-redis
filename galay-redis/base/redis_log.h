@@ -1,131 +1,78 @@
+/**
+ * @file redis_log.h
+ * @brief galay-redis 独立日志入口与埋点宏
+ */
+
 #ifndef GALAY_REDIS_LOG_H
 #define GALAY_REDIS_LOG_H
 
-#include <memory>
-#include <mutex>
-#include <string>
+#include "galay-kernel/common/log_macro.h"
 
-#include <spdlog/spdlog.h>
-#include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
-
-namespace galay::redis
+namespace galay::redis::detail
 {
-    using RedisLoggerPtr = std::shared_ptr<spdlog::logger>;
+struct RedisLogTag;
+} // namespace galay::redis::detail
 
-    class RedisLog
-    {
-    public:
-        static RedisLog* getInstance()
-        {
-            static RedisLog instance;
-            return &instance;
-        }
+namespace galay::redis::log
+{
+using Slot = ::galay::kernel::LoggerSlot<::galay::redis::detail::RedisLogTag>;
 
-        static void enable()
-        {
-            console();
-        }
+/**
+ * @brief 设置 galay-redis 的库级 logger
+ *
+ * @details 只影响 `REDIS_LOG_*` 宏产生的日志，不会启用 kernel、ssl、http
+ * 或其他 galay 库的日志。推荐在创建 Redis 客户端、连接池或会话之前的
+ * 单线程初始化阶段调用。
+ *
+ * @param logger 用户自定义 logger；传入 nullptr 时禁用 galay-redis 日志。
+ */
+void set(::galay::kernel::BaseLogger::uptr logger);
 
-        static void console()
-        {
-            console("RedisLogger");
-        }
+/**
+ * @brief 获取 galay-redis 当前 logger
+ *
+ * @return 当前 logger 指针；未设置时返回 nullptr。
+ *
+ * @note 返回指针的生命周期由 `set()` 注入的 unique_ptr 管理，调用方不得释放。
+ */
+[[nodiscard]] ::galay::kernel::BaseLogger* get() noexcept;
+} // namespace galay::redis::log
 
-        static void console(const std::string& logger_name)
-        {
-            auto instance = getInstance();
-            std::lock_guard<std::mutex> lock(instance->m_mutex);
-            try {
-                auto logger = spdlog::get(logger_name);
-                if (!logger) {
-                    logger = spdlog::stdout_color_mt(logger_name);
-                }
-                applyDefault(logger);
-                instance->m_logger = std::move(logger);
-            } catch (const spdlog::spdlog_ex&) {
-                instance->m_logger = spdlog::get(logger_name);
-            }
-        }
+/// @brief 判断指定级别的 galay-redis 日志是否会实际写入
+#define REDIS_LOG_ENABLED(level)                                                 \
+    GALAY_LOG_ENABLED(::galay::redis::log::get, level)
 
-        static void file(const std::string& log_file_path = "galay-redis.log",
-                         const std::string& logger_name = "RedisLogger",
-                         bool truncate = false)
-        {
-            auto instance = getInstance();
-            std::lock_guard<std::mutex> lock(instance->m_mutex);
-            auto logger = std::make_shared<spdlog::logger>(
-                logger_name,
-                std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_file_path, !truncate));
-            applyDefault(logger);
-            instance->m_logger = std::move(logger);
-        }
+/// @brief galay-redis 追踪日志宏，用于最详细的开发调试信息
+#define REDIS_LOG_TRACE(tag, ...)                                                \
+    GALAY_LOG_WITH_LOGGER(::galay::redis::log::get,                              \
+                          ::galay::kernel::LogLevel::kTrace, "[redis] " tag,     \
+                          __VA_ARGS__)
 
-        static void disable()
-        {
-            auto instance = getInstance();
-            std::lock_guard<std::mutex> lock(instance->m_mutex);
-            if (instance->m_logger) {
-                instance->m_logger->set_level(spdlog::level::off);
-            }
-            instance->m_logger.reset();
-        }
+/// @brief galay-redis 调试日志宏，用于排查问题时的上下文信息
+#define REDIS_LOG_DEBUG(tag, ...)                                                \
+    GALAY_LOG_WITH_LOGGER(::galay::redis::log::get,                              \
+                          ::galay::kernel::LogLevel::kDebug, "[redis] " tag,     \
+                          __VA_ARGS__)
 
-        static void setLogger(RedisLoggerPtr logger)
-        {
-            auto instance = getInstance();
-            std::lock_guard<std::mutex> lock(instance->m_mutex);
-            instance->m_logger = std::move(logger);
-        }
+/// @brief galay-redis 信息日志宏，用于记录连接、认证和命令执行等关键事件
+#define REDIS_LOG_INFO(tag, ...)                                                 \
+    GALAY_LOG_WITH_LOGGER(::galay::redis::log::get,                              \
+                          ::galay::kernel::LogLevel::kInfo, "[redis] " tag,      \
+                          __VA_ARGS__)
 
-        RedisLoggerPtr getLogger() const
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            return m_logger;
-        }
+/// @brief galay-redis 警告日志宏，用于表示可恢复异常或潜在问题
+#define REDIS_LOG_WARN(tag, ...)                                                 \
+    GALAY_LOG_WITH_LOGGER(::galay::redis::log::get,                              \
+                          ::galay::kernel::LogLevel::kWarn, "[redis] " tag,      \
+                          __VA_ARGS__)
 
-    private:
-        static void applyDefault(const RedisLoggerPtr& logger)
-        {
-            if (!logger) {
-                return;
-            }
-            logger->set_pattern("[%Y-%m-%d %T.%e] [%^%L%$] [%s:%#] %v");
-#ifdef ENABLE_DEBUG
-            logger->set_level(spdlog::level::debug);
-#else
-            logger->set_level(spdlog::level::info);
-#endif
-        }
+/// @brief galay-redis 错误日志宏，用于表示连接、协议或命令失败
+#define REDIS_LOG_ERROR(tag, ...)                                                \
+    GALAY_LOG_WITH_LOGGER(::galay::redis::log::get,                              \
+                          ::galay::kernel::LogLevel::kError, "[redis] " tag,     \
+                          __VA_ARGS__)
 
-        mutable std::mutex m_mutex;
-        RedisLoggerPtr m_logger;
-    };
+/// @brief 兼容致命级别调用点的别名，当前按错误级别写入
+#define REDIS_LOG_CRITICAL(tag, ...) REDIS_LOG_ERROR(tag, __VA_ARGS__)
 
-    namespace detail
-    {
-        inline RedisLoggerPtr resolveLogger(const RedisLoggerPtr& logger)
-        {
-            if (logger) {
-                return logger;
-            }
-            return RedisLog::getInstance()->getLogger();
-        }
-    } // namespace detail
-
-    #define RedisLogTrace(logger, ...) \
-        do { auto _logger = ::galay::redis::detail::resolveLogger((logger)); if (_logger) SPDLOG_LOGGER_TRACE(_logger, __VA_ARGS__); } while (0)
-    #define RedisLogDebug(logger, ...) \
-        do { auto _logger = ::galay::redis::detail::resolveLogger((logger)); if (_logger) SPDLOG_LOGGER_DEBUG(_logger, __VA_ARGS__); } while (0)
-    #define RedisLogInfo(logger, ...) \
-        do { auto _logger = ::galay::redis::detail::resolveLogger((logger)); if (_logger) SPDLOG_LOGGER_INFO(_logger, __VA_ARGS__); } while (0)
-    #define RedisLogWarn(logger, ...) \
-        do { auto _logger = ::galay::redis::detail::resolveLogger((logger)); if (_logger) SPDLOG_LOGGER_WARN(_logger, __VA_ARGS__); } while (0)
-    #define RedisLogError(logger, ...) \
-        do { auto _logger = ::galay::redis::detail::resolveLogger((logger)); if (_logger) SPDLOG_LOGGER_ERROR(_logger, __VA_ARGS__); } while (0)
-    #define RedisLogCritical(logger, ...) \
-        do { auto _logger = ::galay::redis::detail::resolveLogger((logger)); if (_logger) SPDLOG_LOGGER_CRITICAL(_logger, __VA_ARGS__); } while (0)
-
-}
-
-#endif
+#endif // GALAY_REDIS_LOG_H

@@ -1,11 +1,10 @@
-find_package(galay-kernel 4.0.0 CONFIG REQUIRED)
+find_package(galay-kernel 5.0.0 CONFIG REQUIRED)
 find_package(galay-utils 2.0.0 CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_path(GALAY_REDIS_SPDLOG_INCLUDE_DIR spdlog/spdlog.h REQUIRED)
 include(CMakePackageConfigHelpers)
 
 if(GALAY_REDIS_ENABLE_SSL)
-    find_package(galay-ssl 2.0.0 CONFIG REQUIRED)
+    find_package(galay-ssl 2.1.0 CONFIG REQUIRED)
 
     if(NOT TARGET galay-ssl::galay-ssl)
         message(FATAL_ERROR "galay-ssl::galay-ssl target not found. Please install galay-ssl or disable GALAY_REDIS_ENABLE_SSL.")
@@ -119,7 +118,6 @@ target_include_directories(${PROJECT_NAME}
         ${CMAKE_CURRENT_SOURCE_DIR}
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
-        $<BUILD_INTERFACE:${GALAY_REDIS_SPDLOG_INCLUDE_DIR}>
         $<INSTALL_INTERFACE:include>
 )
 

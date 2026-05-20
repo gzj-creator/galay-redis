@@ -8,7 +8,8 @@
 #include <galay-kernel/common/host.hpp>
 #include <galay-kernel/common/error.h>
 #ifdef GALAY_REDIS_SSL_ENABLED
-#include <galay-ssl/async/ssl_awaitable_core.h>
+#include <galay-ssl/async/ssl_await.h>
+#include <galay-ssl/async/ssl_socket.h>
 #endif
 #include <concepts>
 #include <memory>
@@ -582,8 +583,6 @@ namespace galay::redis
 
         // ======================== 连接管理 ========================
 
-        RedisLoggerPtr& logger() { return m_logger; }
-        void setLogger(RedisLoggerPtr logger) { m_logger = std::move(logger); }
         TcpSocket& socket() { return m_socket; }
         protocol::RespParser& parser() { return m_parser; }
         RedisBufferProvider& bufferProvider() { return *m_buffer_provider; }
@@ -606,8 +605,6 @@ namespace galay::redis
         protocol::RespParser m_parser;
         AsyncRedisConfig m_config;
         std::shared_ptr<RedisBufferProvider> m_buffer_provider;
-
-        RedisLoggerPtr m_logger;
     };
 
     class RedissClient
@@ -632,8 +629,6 @@ namespace galay::redis
         detail::RedissExchangeOperation receive(size_t expected_replies = 1);
         detail::RedissExchangeOperation batch(std::span<const RedisCommandView> commands);
 
-        RedisLoggerPtr& logger();
-        void setLogger(RedisLoggerPtr logger);
         const AsyncRedisConfig& asyncConfig() const;
         const RedissClientConfig& tlsConfig() const;
         bool isClosed() const;

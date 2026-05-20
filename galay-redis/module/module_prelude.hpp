@@ -77,12 +77,6 @@
 #if __has_include(<queue>)
 #include <queue>
 #endif
-#if __has_include(<spdlog/sinks/stdout_color_sinks.h>)
-#include <spdlog/sinks/stdout_color_sinks.h>
-#endif
-#if __has_include(<spdlog/spdlog.h>)
-#include <spdlog/spdlog.h>
-#endif
 #if __has_include(<string>)
 #include <string>
 #endif
@@ -104,8 +98,8 @@
 #if __has_include(<vector>)
 #include <vector>
 #endif
-#if __has_include(<galay-ssl/async/ssl_awaitable_core.h>)
-#include <galay-ssl/async/ssl_awaitable_core.h>
+#if __has_include(<galay-ssl/async/ssl_await.h>)
+#include <galay-ssl/async/ssl_await.h>
 #endif
 #if __has_include(<galay-ssl/async/ssl_socket.h>)
 #include <galay-ssl/async/ssl_socket.h>

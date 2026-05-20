@@ -502,9 +502,6 @@ namespace galay::redis
          */
         const ConnectionPoolConfig& getConfig() const { return m_config; }
 
-        RedisLoggerPtr& logger() { return m_logger; }
-        void setLogger(RedisLoggerPtr logger) { m_logger = std::move(logger); }
-
         ~RedisConnectionPool();
 
     private:
@@ -556,9 +553,6 @@ namespace galay::redis
         std::atomic<double> m_max_acquire_time_ms{0.0};
         std::atomic<size_t> m_peak_active_connections{0};
 
-        // 日志
-        RedisLoggerPtr m_logger;
-
     };
 
     class RedissConnectionPool
@@ -586,9 +580,6 @@ namespace galay::redis
         void shutdown();
         PoolStats getStats() const;
         const RedissConnectionPoolConfig& getConfig() const { return m_config; }
-
-        RedisLoggerPtr& logger() { return m_logger; }
-        void setLogger(RedisLoggerPtr logger) { m_logger = std::move(logger); }
 
         ~RedissConnectionPool();
 
@@ -627,8 +618,6 @@ namespace galay::redis
         std::atomic<uint64_t> m_total_acquire_time_ms{0};
         std::atomic<double> m_max_acquire_time_ms{0.0};
         std::atomic<size_t> m_peak_active_connections{0};
-
-        RedisLoggerPtr m_logger;
     };
 
     /**

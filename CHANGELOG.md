@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+## [v2.1.0] - 2026-05-20
+
+### Added
+- 新增 `galay::redis::log::set/get` 库级日志入口，使用 `galay-kernel` 的 `BaseLogger` 和独立 logger 槽位。
+- 新增 `REDIS_LOG_*` 埋点宏，并在 async 客户端、TLS 客户端、连接池和遗留同步会话路径补充日志埋点。
+- 新增 `t26_log` 回归测试，验证未设置 logger 和级别过滤时不会求值日志格式化参数。
+
+### Changed
+- 移除旧的 `spdlog` / `RedisLog` / `setLogger` / `logger()` 公开日志入口，Redis 日志改为只通过库级 `BaseLogger` 注入启用。
+- 将 `galay-kernel` 依赖提升到 `5.0.0`，将 TLS 路径的 `galay-ssl` 依赖提升到 `2.1.0`。
+- 当前发布版本提升到 `2.1.0`，并同步 CMake package 版本。
+
 ## [v2.0.3] - 2026-05-18
 
 ### Changed

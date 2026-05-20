@@ -8,18 +8,8 @@ namespace galay::redis
 {
     RedisSession::RedisSession(RedisConfig config)
         : m_config(config)
-        , m_logger(Logger::createStdoutLoggerMT("RedisLogger"))
         , m_connection(std::make_unique<protocol::Connection>())
     {
-        m_logger->pattern("[%Y-%m-%d %H:%M:%S.%f][%L][%t][%25!s:%4!#][%20!!] %v").level(spdlog::level::info);
-    }
-
-    RedisSession::RedisSession(RedisConfig config, Logger::uptr logger)
-        : m_config(config)
-        , m_logger(std::move(logger))
-        , m_connection(std::make_unique<protocol::Connection>())
-    {
-        m_logger->level(spdlog::level::info);
     }
 
     // redis://[username:password@]host[:port][/db_index]
@@ -40,14 +30,14 @@ namespace galay::redis
             if (matches.size() > 3 && !matches[3].str().empty()) {
                 host = matches[3];
             } else {
-                RedisLogError(m_logger->getSpdlogger(), "[Redis host is invalid]");
+                REDIS_LOG_ERROR("[client]", "[Redis host is invalid]");
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_HOST_INVALID_ERROR));
             }
             if (matches.size() > 4 && !matches[4].str().empty()) {
                 try {
                     port = std::stoi(matches[4]);
                 } catch(const std::exception& e) {
-                    RedisLogError(m_logger->getSpdlogger(), "[Redis port is invalid]");
+                    REDIS_LOG_ERROR("[client]", "[Redis port is invalid]");
                     return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_PORT_INVALID_ERROR));
                 }
             }
@@ -55,12 +45,12 @@ namespace galay::redis
                 try {
                     db_index = std::stoi(matches[5]);
                 } catch(const std::exception& e) {
-                    RedisLogError(m_logger->getSpdlogger(), "[Redis url is invalid]");
+                    REDIS_LOG_ERROR("[client]", "[Redis url is invalid]");
                     return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_DB_INDEX_INVALID_ERROR));
                 }
             }
         } else {
-            RedisLogError(m_logger->getSpdlogger(), "[Redis url is invalid]");
+            REDIS_LOG_ERROR("[client]", "[Redis url is invalid]");
             return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_URL_INVALID_ERROR));
         }
 
@@ -77,13 +67,13 @@ namespace galay::redis
         {
             ip = getHostIPV4(host);
             if (ip.empty()) {
-                RedisLogError(m_logger->getSpdlogger(), "[Get domain's IPV4 failed]");
+                REDIS_LOG_ERROR("[client]", "[Get domain's IPV4 failed]");
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_ADDRESS_TYPE_INVALID_ERROR));
             }
             break;
         }
         default:
-            RedisLogError(m_logger->getSpdlogger(), "[Unsupported address type]");
+            REDIS_LOG_ERROR("[client]", "[Unsupported address type]");
             return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_ADDRESS_TYPE_INVALID_ERROR));
         }
 
@@ -111,11 +101,11 @@ namespace galay::redis
         uint32_t timeout_ms = 5000;  // 默认5秒超时
         auto connect_result = m_connection->connect(host, port, timeout_ms);
         if (!connect_result) {
-            RedisLogError(m_logger->getSpdlogger(), "[Redis connect to {}:{} failed, error is {}]", host.c_str(), port, connect_result.error().message());
+            REDIS_LOG_ERROR("[client]", "[Redis connect to {}:{} failed, error is {}]", host.c_str(), port, connect_result.error().message());
             return connect_result;
         }
 
-        RedisLogInfo(m_logger->getSpdlogger(), "[Redis connect to {}:{}]", host.c_str(), port);
+        REDIS_LOG_INFO("[client]", "[Redis connect to {}:{}]", host.c_str(), port);
 
         // Authentication
         if (!password.empty()) {
@@ -133,11 +123,11 @@ namespace galay::redis
             auto auth_reply = redisCommand(m_encoder.encodeCommand(auth_cmd));
             if (!auth_reply || auth_reply->isError()) {
                 std::string error_msg = auth_reply ? auth_reply->toError() : "Authentication failure";
-                RedisLogError(m_logger->getSpdlogger(), "[Authentication failure, error is {}]", error_msg);
+                REDIS_LOG_ERROR("[client]", "[Authentication failure, error is {}]", error_msg);
                 disconnect();
                 return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_AUTH_ERROR, error_msg));
             }
-            RedisLogInfo(m_logger->getSpdlogger(), "[Authentication success]");
+            REDIS_LOG_INFO("[client]", "[Authentication success]");
         }
 
         // 选择数据库
@@ -284,16 +274,16 @@ namespace galay::redis
 
     std::expected<RedisValue, RedisError> RedisSession::redisCommand(const std::string &encoded_cmd)
     {
-        RedisLogInfo(m_logger->getSpdlogger(), "[redisCommand]");
+        REDIS_LOG_INFO("[client]", "[redisCommand]");
 
         if (!m_connection || !m_connection->isConnected()) {
-            RedisLogError(m_logger->getSpdlogger(), "[redisCommand failed, not connected]");
+            REDIS_LOG_ERROR("[client]", "[redisCommand failed, not connected]");
             return std::unexpected(RedisError(RedisErrorType::REDIS_ERROR_TYPE_CONNECTION_ERROR, "Not connected"));
         }
 
         auto reply_result = m_connection->execute(encoded_cmd);
         if (!reply_result) {
-            RedisLogError(m_logger->getSpdlogger(), "[redisCommand failed, error is {}]", reply_result.error().message());
+            REDIS_LOG_ERROR("[client]", "[redisCommand failed, error is {}]", reply_result.error().message());
             return std::unexpected(reply_result.error());
         }
 

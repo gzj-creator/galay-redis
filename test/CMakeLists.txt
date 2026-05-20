@@ -26,6 +26,7 @@ set(GALAY_REDIS_UNIT_TESTS
     t15_surface
     t16_rediss
     t20_encoder
+    t26_log
 )
 
 foreach(SRC ${SRC_LIST})
