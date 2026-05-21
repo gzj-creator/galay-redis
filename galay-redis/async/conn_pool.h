@@ -1,3 +1,13 @@
+/**
+ * @file conn_pool.h
+ * @brief Redis 连接池管理
+ * @author galay-redis
+ * @version 1.0.0
+ *
+ * @details 提供 Redis/Rediss 连接池的配置、连接包装、协程等待体以及连接池实现，
+ *          支持自动扩缩容、健康检查、空闲清理和 RAII 风格的连接管理。
+ */
+
 #ifndef GALAY_REDIS_CONNECTION_POOL_H
 #define GALAY_REDIS_CONNECTION_POOL_H
 
@@ -18,41 +28,45 @@ namespace galay::redis
     using galay::kernel::IOScheduler;
 
     /**
-     * @brief 连接池配置
+     * @brief Redis 连接池配置
+     * @details 包含连接参数、连接池大小、超时配置、健康检查和重连等配置项
      */
     struct ConnectionPoolConfig
     {
         // 连接参数
-        std::string host = "127.0.0.1";
-        int32_t port = 6379;
-        std::string username = "";
-        std::string password = "";
-        int32_t db_index = 0;
+        std::string host = "127.0.0.1";        ///< Redis 服务器地址
+        int32_t port = 6379;                    ///< Redis 服务器端口
+        std::string username = "";              ///< 认证用户名
+        std::string password = "";              ///< 认证密码
+        int32_t db_index = 0;                   ///< 数据库索引
 
         // 连接池大小
-        size_t min_connections = 2;      // 最小连接数
-        size_t max_connections = 10;     // 最大连接数
-        size_t initial_connections = 2;  // 初始连接数
+        size_t min_connections = 2;      ///< 最小连接数
+        size_t max_connections = 10;     ///< 最大连接数
+        size_t initial_connections = 2;  ///< 初始连接数
 
         // 超时配置
-        std::chrono::milliseconds acquire_timeout = std::chrono::seconds(5);  // 获取连接超时
-        std::chrono::milliseconds idle_timeout = std::chrono::minutes(5);     // 空闲连接超时
-        std::chrono::milliseconds connect_timeout = std::chrono::seconds(3);  // 连接超时
+        std::chrono::milliseconds acquire_timeout = std::chrono::seconds(5);  ///< 获取连接超时
+        std::chrono::milliseconds idle_timeout = std::chrono::minutes(5);     ///< 空闲连接超时
+        std::chrono::milliseconds connect_timeout = std::chrono::seconds(3);  ///< 连接超时
 
         // 健康检查
-        bool enable_health_check = true;
-        std::chrono::milliseconds health_check_interval = std::chrono::seconds(30);
+        bool enable_health_check = true;                                        ///< 是否启用健康检查
+        std::chrono::milliseconds health_check_interval = std::chrono::seconds(30); ///< 健康检查间隔
 
         // 重连配置
-        bool enable_auto_reconnect = true;
-        int max_reconnect_attempts = 3;
+        bool enable_auto_reconnect = true;  ///< 是否启用自动重连
+        int max_reconnect_attempts = 3;     ///< 最大重连尝试次数
 
         // 连接验证配置
-        bool enable_connection_validation = true;  // 获取连接时是否验证
-        bool validate_on_acquire = false;          // 每次获取时都验证（性能开销较大）
-        bool validate_on_return = false;           // 归还时验证
+        bool enable_connection_validation = true;  ///< 获取连接时是否验证
+        bool validate_on_acquire = false;          ///< 每次获取时都验证（性能开销较大）
+        bool validate_on_return = false;           ///< 归还时验证
 
-        // 验证配置
+        /**
+         * @brief 验证配置参数是否合法
+         * @return 配置合法返回 true
+         */
         bool validate() const
         {
             return min_connections <= max_connections &&
@@ -61,13 +75,23 @@ namespace galay::redis
                    max_connections > 0;
         }
 
-        // 创建默认配置
+        /**
+         * @brief 创建默认配置
+         * @return 默认连接池配置
+         */
         static ConnectionPoolConfig defaultConfig()
         {
             return ConnectionPoolConfig{};
         }
 
-        // 创建自定义配置
+        /**
+         * @brief 创建自定义配置
+         * @param host Redis 服务器地址
+         * @param port Redis 服务器端口
+         * @param min_conn 最小连接数
+         * @param max_conn 最大连接数
+         * @return 自定义连接池配置
+         */
         static ConnectionPoolConfig create(const std::string& host, int32_t port,
                                           size_t min_conn = 2, size_t max_conn = 10)
         {
@@ -81,34 +105,42 @@ namespace galay::redis
         }
     };
 
+    /**
+     * @brief Rediss（TLS）连接池配置
+     * @details 与 ConnectionPoolConfig 类似，但增加了 TLS 配置项，默认端口为 6380
+     */
     struct RedissConnectionPoolConfig
     {
-        std::string host = "127.0.0.1";
-        int32_t port = 6380;
-        std::string username = "";
-        std::string password = "";
-        int32_t db_index = 0;
+        std::string host = "127.0.0.1";        ///< Redis 服务器地址
+        int32_t port = 6380;                    ///< Redis TLS 端口
+        std::string username = "";              ///< 认证用户名
+        std::string password = "";              ///< 认证密码
+        int32_t db_index = 0;                   ///< 数据库索引
 
-        size_t min_connections = 2;
-        size_t max_connections = 10;
-        size_t initial_connections = 2;
+        size_t min_connections = 2;             ///< 最小连接数
+        size_t max_connections = 10;            ///< 最大连接数
+        size_t initial_connections = 2;         ///< 初始连接数
 
-        std::chrono::milliseconds acquire_timeout = std::chrono::seconds(5);
-        std::chrono::milliseconds idle_timeout = std::chrono::minutes(5);
-        std::chrono::milliseconds connect_timeout = std::chrono::seconds(3);
+        std::chrono::milliseconds acquire_timeout = std::chrono::seconds(5);   ///< 获取连接超时
+        std::chrono::milliseconds idle_timeout = std::chrono::minutes(5);      ///< 空闲连接超时
+        std::chrono::milliseconds connect_timeout = std::chrono::seconds(3);   ///< 连接超时
 
-        bool enable_health_check = true;
-        std::chrono::milliseconds health_check_interval = std::chrono::seconds(30);
+        bool enable_health_check = true;                                        ///< 是否启用健康检查
+        std::chrono::milliseconds health_check_interval = std::chrono::seconds(30); ///< 健康检查间隔
 
-        bool enable_auto_reconnect = true;
-        int max_reconnect_attempts = 3;
+        bool enable_auto_reconnect = true;  ///< 是否启用自动重连
+        int max_reconnect_attempts = 3;     ///< 最大重连尝试次数
 
-        bool enable_connection_validation = true;
-        bool validate_on_acquire = false;
-        bool validate_on_return = false;
+        bool enable_connection_validation = true;  ///< 获取连接时是否验证
+        bool validate_on_acquire = false;          ///< 每次获取时都验证
+        bool validate_on_return = false;           ///< 归还时验证
 
-        RedissClientConfig tls_config;
+        RedissClientConfig tls_config; ///< TLS 配置
 
+        /**
+         * @brief 验证配置参数是否合法
+         * @return 配置合法返回 true
+         */
         bool validate() const
         {
             return min_connections <= max_connections &&
@@ -117,11 +149,23 @@ namespace galay::redis
                    max_connections > 0;
         }
 
+        /**
+         * @brief 创建默认配置
+         * @return 默认 Rediss 连接池配置
+         */
         static RedissConnectionPoolConfig defaultConfig()
         {
             return RedissConnectionPoolConfig{};
         }
 
+        /**
+         * @brief 创建自定义配置
+         * @param host Redis 服务器地址
+         * @param port Redis 服务器端口
+         * @param min_conn 最小连接数
+         * @param max_conn 最大连接数
+         * @return 自定义 Rediss 连接池配置
+         */
         static RedissConnectionPoolConfig create(const std::string& host, int32_t port,
                                                  size_t min_conn = 2, size_t max_conn = 10)
         {
@@ -136,11 +180,17 @@ namespace galay::redis
     };
 
     /**
-     * @brief 连接包装器，用于管理连接的生命周期
+     * @brief Redis 连接包装器，用于管理连接的生命周期
+     * @details 封装 RedisClient 指针，提供最后使用时间、健康状态等管理功能
      */
     class PooledConnection
     {
     public:
+        /**
+         * @brief 构造连接包装器
+         * @param client Redis 客户端智能指针
+         * @param scheduler IO 调度器指针
+         */
         PooledConnection(std::shared_ptr<RedisClient> client, IOScheduler* scheduler)
             : m_client(std::move(client))
             , m_scheduler(scheduler)
@@ -149,45 +199,56 @@ namespace galay::redis
         {
         }
 
-        RedisClient* get() { return m_client.get(); }
-        const RedisClient* get() const { return m_client.get(); }
+        RedisClient* get() { return m_client.get(); }              ///< 获取原始客户端指针
+        const RedisClient* get() const { return m_client.get(); }  ///< 获取原始客户端指针（const）
 
-        RedisClient* operator->() { return m_client.get(); }
-        const RedisClient* operator->() const { return m_client.get(); }
+        RedisClient* operator->() { return m_client.get(); }              ///< 箭头操作符访问客户端
+        const RedisClient* operator->() const { return m_client.get(); }  ///< 箭头操作符访问客户端（const）
 
-        RedisClient& operator*() { return *m_client; }
-        const RedisClient& operator*() const { return *m_client; }
+        RedisClient& operator*() { return *m_client; }              ///< 解引用操作符
+        const RedisClient& operator*() const { return *m_client; }  ///< 解引用操作符（const）
 
-        // 更新最后使用时间
+        /**
+         * @brief 更新最后使用时间为当前时刻
+         */
         void updateLastUsed()
         {
             m_last_used = std::chrono::steady_clock::now();
         }
 
-        // 获取空闲时间
+        /**
+         * @brief 获取连接空闲时间
+         * @return 自上次使用以来经过的毫秒数
+         */
         std::chrono::milliseconds getIdleTime() const
         {
             auto now = std::chrono::steady_clock::now();
             return std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_used);
         }
 
-        // 健康状态
-        bool isHealthy() const { return m_is_healthy; }
-        void setHealthy(bool healthy) { m_is_healthy = healthy; }
-
-        // 检查是否已关闭
-        bool isClosed() const { return m_client->isClosed(); }
+        bool isHealthy() const { return m_is_healthy; }            ///< 获取健康状态
+        void setHealthy(bool healthy) { m_is_healthy = healthy; }  ///< 设置健康状态
+        bool isClosed() const { return m_client->isClosed(); }     ///< 检查连接是否已关闭
 
     private:
-        std::shared_ptr<RedisClient> m_client;
-        IOScheduler* m_scheduler;
-        std::chrono::steady_clock::time_point m_last_used;
-        bool m_is_healthy;
+        std::shared_ptr<RedisClient> m_client;                          ///< 底层 Redis 客户端
+        IOScheduler* m_scheduler;                                        ///< IO 调度器
+        std::chrono::steady_clock::time_point m_last_used;               ///< 最后使用时间
+        bool m_is_healthy;                                               ///< 健康状态标志
     };
 
+    /**
+     * @brief Rediss（TLS）连接包装器
+     * @details 封装 RedissClient 指针，提供与 PooledConnection 相同的管理功能
+     */
     class PooledRedissConnection
     {
     public:
+        /**
+         * @brief 构造 Rediss 连接包装器
+         * @param client Rediss 客户端智能指针
+         * @param scheduler IO 调度器指针
+         */
         PooledRedissConnection(std::shared_ptr<RedissClient> client, IOScheduler* scheduler)
             : m_client(std::move(client))
             , m_scheduler(scheduler)
@@ -196,35 +257,42 @@ namespace galay::redis
         {
         }
 
-        RedissClient* get() { return m_client.get(); }
-        const RedissClient* get() const { return m_client.get(); }
+        RedissClient* get() { return m_client.get(); }              ///< 获取原始客户端指针
+        const RedissClient* get() const { return m_client.get(); }  ///< 获取原始客户端指针（const）
 
-        RedissClient* operator->() { return m_client.get(); }
-        const RedissClient* operator->() const { return m_client.get(); }
+        RedissClient* operator->() { return m_client.get(); }              ///< 箭头操作符访问客户端
+        const RedissClient* operator->() const { return m_client.get(); }  ///< 箭头操作符访问客户端（const）
 
-        RedissClient& operator*() { return *m_client; }
-        const RedissClient& operator*() const { return *m_client; }
+        RedissClient& operator*() { return *m_client; }              ///< 解引用操作符
+        const RedissClient& operator*() const { return *m_client; }  ///< 解引用操作符（const）
 
+        /**
+         * @brief 更新最后使用时间为当前时刻
+         */
         void updateLastUsed()
         {
             m_last_used = std::chrono::steady_clock::now();
         }
 
+        /**
+         * @brief 获取连接空闲时间
+         * @return 自上次使用以来经过的毫秒数
+         */
         std::chrono::milliseconds getIdleTime() const
         {
             auto now = std::chrono::steady_clock::now();
             return std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_used);
         }
 
-        bool isHealthy() const { return m_is_healthy; }
-        void setHealthy(bool healthy) { m_is_healthy = healthy; }
-        bool isClosed() const { return m_client->isClosed(); }
+        bool isHealthy() const { return m_is_healthy; }            ///< 获取健康状态
+        void setHealthy(bool healthy) { m_is_healthy = healthy; }  ///< 设置健康状态
+        bool isClosed() const { return m_client->isClosed(); }     ///< 检查连接是否已关闭
 
     private:
-        std::shared_ptr<RedissClient> m_client;
-        IOScheduler* m_scheduler;
-        std::chrono::steady_clock::time_point m_last_used;
-        bool m_is_healthy;
+        std::shared_ptr<RedissClient> m_client;                         ///< 底层 Rediss 客户端
+        IOScheduler* m_scheduler;                                       ///< IO 调度器
+        std::chrono::steady_clock::time_point m_last_used;              ///< 最后使用时间
+        bool m_is_healthy;                                              ///< 健康状态标志
     };
 
     // 前向声明
@@ -314,6 +382,10 @@ namespace galay::redis
         InnerAwaitable m_inner;
     };
 
+    /**
+     * @brief Rediss 连接池初始化等待体
+     * @details 用于协程中等待 Rediss 连接池初始化完成
+     */
     class RedissPoolInitializeAwaitable : public galay::kernel::TimeoutSupport<RedissPoolInitializeAwaitable>
     {
     public:
@@ -352,6 +424,10 @@ namespace galay::redis
         InnerAwaitable m_inner;
     };
 
+    /**
+     * @brief Rediss 连接池获取连接等待体
+     * @details 用于协程中等待从 Rediss 连接池获取可用连接
+     */
     class RedissPoolAcquireAwaitable : public galay::kernel::TimeoutSupport<RedissPoolAcquireAwaitable>
     {
     public:
@@ -508,10 +584,10 @@ namespace galay::redis
         friend class PoolInitializeAwaitable;
         friend class PoolAcquireAwaitable;
 
-        RedisVoidResult initializeSync();
+        RedisVoidResult initializeSync(); ///< 同步初始化实现
         std::expected<std::shared_ptr<PooledConnection>, RedisError>
-        acquireSync(std::chrono::steady_clock::time_point start_time);
-        void recordAcquireStats(std::chrono::steady_clock::time_point start_time);
+        acquireSync(std::chrono::steady_clock::time_point start_time); ///< 同步获取连接实现
+        void recordAcquireStats(std::chrono::steady_clock::time_point start_time); ///< 记录获取连接统计
 
         /**
          * @brief 获取或创建连接（内部方法，同步）
@@ -524,62 +600,72 @@ namespace galay::redis
         bool checkConnectionHealthSync(std::shared_ptr<PooledConnection> conn);
 
     private:
-        IOScheduler* m_scheduler;
-        ConnectionPoolConfig m_config;
+        IOScheduler* m_scheduler;                                            ///< IO 调度器
+        ConnectionPoolConfig m_config;                                       ///< 连接池配置
 
         // 连接管理
-        std::queue<std::shared_ptr<PooledConnection>> m_available_connections;
-        std::vector<std::shared_ptr<PooledConnection>> m_all_connections;
-        mutable std::mutex m_mutex;
-        std::condition_variable m_cv;
+        std::queue<std::shared_ptr<PooledConnection>> m_available_connections; ///< 可用连接队列
+        std::vector<std::shared_ptr<PooledConnection>> m_all_connections;      ///< 所有连接列表
+        mutable std::mutex m_mutex;                                            ///< 互斥锁
+        std::condition_variable m_cv;                                          ///< 条件变量
 
         // 状态标志
-        std::atomic<bool> m_is_initialized{false};
-        std::atomic<bool> m_is_shutting_down{false};
+        std::atomic<bool> m_is_initialized{false};       ///< 是否已初始化
+        std::atomic<bool> m_is_shutting_down{false};     ///< 是否正在关闭
 
         // 统计信息
-        std::atomic<uint64_t> m_total_acquired{0};
-        std::atomic<uint64_t> m_total_released{0};
-        std::atomic<uint64_t> m_total_created{0};
-        std::atomic<uint64_t> m_total_destroyed{0};
-        std::atomic<uint64_t> m_health_check_failures{0};
-        std::atomic<size_t> m_waiting_requests{0};
-        std::atomic<uint64_t> m_reconnect_attempts{0};
-        std::atomic<uint64_t> m_reconnect_successes{0};
-        std::atomic<uint64_t> m_validation_failures{0};
+        std::atomic<uint64_t> m_total_acquired{0};       ///< 总获取次数
+        std::atomic<uint64_t> m_total_released{0};       ///< 总归还次数
+        std::atomic<uint64_t> m_total_created{0};        ///< 总创建次数
+        std::atomic<uint64_t> m_total_destroyed{0};      ///< 总销毁次数
+        std::atomic<uint64_t> m_health_check_failures{0}; ///< 健康检查失败次数
+        std::atomic<size_t> m_waiting_requests{0};       ///< 等待中的请求数
+        std::atomic<uint64_t> m_reconnect_attempts{0};   ///< 重连尝试次数
+        std::atomic<uint64_t> m_reconnect_successes{0};  ///< 重连成功次数
+        std::atomic<uint64_t> m_validation_failures{0};  ///< 验证失败次数
 
         // 性能监控
-        std::atomic<uint64_t> m_total_acquire_time_ms{0};
-        std::atomic<double> m_max_acquire_time_ms{0.0};
-        std::atomic<size_t> m_peak_active_connections{0};
+        std::atomic<uint64_t> m_total_acquire_time_ms{0};  ///< 总获取时间（毫秒）
+        std::atomic<double> m_max_acquire_time_ms{0.0};    ///< 最大获取时间（毫秒）
+        std::atomic<size_t> m_peak_active_connections{0};  ///< 峰值活跃连接数
 
     };
 
+    /**
+     * @brief Rediss（TLS）连接池
+     * @details 与 RedisConnectionPool 功能一致，但使用 TLS 加密连接，
+     *          适用于需要安全通信的场景
+     */
     class RedissConnectionPool
     {
     public:
-        using PoolStats = RedisConnectionPool::PoolStats;
+        using PoolStats = RedisConnectionPool::PoolStats; ///< 连接池统计信息类型别名
 
+        /**
+         * @brief 构造 Rediss 连接池
+         * @param scheduler IO 调度器
+         * @param config Rediss 连接池配置
+         */
         RedissConnectionPool(IOScheduler* scheduler,
                              RedissConnectionPoolConfig config = RedissConnectionPoolConfig::defaultConfig());
 
-        RedissConnectionPool(const RedissConnectionPool&) = delete;
-        RedissConnectionPool& operator=(const RedissConnectionPool&) = delete;
-        RedissConnectionPool(RedissConnectionPool&&) = delete;
-        RedissConnectionPool& operator=(RedissConnectionPool&&) = delete;
+        RedissConnectionPool(const RedissConnectionPool&) = delete; ///< 禁止拷贝
+        RedissConnectionPool& operator=(const RedissConnectionPool&) = delete; ///< 禁止拷贝赋值
+        RedissConnectionPool(RedissConnectionPool&&) = delete; ///< 禁止移动
+        RedissConnectionPool& operator=(RedissConnectionPool&&) = delete; ///< 禁止移动赋值
 
-        RedissPoolInitializeAwaitable initialize();
-        RedissPoolAcquireAwaitable acquire();
-        void release(std::shared_ptr<PooledRedissConnection> conn);
-        void triggerHealthCheck();
-        void triggerIdleCleanup();
-        void warmup();
-        size_t cleanupUnhealthyConnections();
-        size_t expandPool(size_t count);
-        size_t shrinkPool(size_t target_size);
-        void shutdown();
-        PoolStats getStats() const;
-        const RedissConnectionPoolConfig& getConfig() const { return m_config; }
+        RedissPoolInitializeAwaitable initialize(); ///< 初始化连接池
+        RedissPoolAcquireAwaitable acquire(); ///< 获取连接
+        void release(std::shared_ptr<PooledRedissConnection> conn); ///< 归还连接
+        void triggerHealthCheck(); ///< 手动触发健康检查
+        void triggerIdleCleanup(); ///< 手动触发空闲连接清理
+        void warmup(); ///< 预热连接池
+        size_t cleanupUnhealthyConnections(); ///< 清理不健康的连接
+        size_t expandPool(size_t count); ///< 扩容连接池
+        size_t shrinkPool(size_t target_size); ///< 缩容连接池
+        void shutdown(); ///< 关闭连接池
+        PoolStats getStats() const; ///< 获取连接池统计信息
+        const RedissConnectionPoolConfig& getConfig() const { return m_config; } ///< 获取配置
 
         ~RedissConnectionPool();
 
@@ -587,37 +673,37 @@ namespace galay::redis
         friend class RedissPoolInitializeAwaitable;
         friend class RedissPoolAcquireAwaitable;
 
-        RedisVoidResult initializeSync();
+        RedisVoidResult initializeSync(); ///< 同步初始化实现
         std::expected<std::shared_ptr<PooledRedissConnection>, RedisError>
-        acquireSync(std::chrono::steady_clock::time_point start_time);
-        void recordAcquireStats(std::chrono::steady_clock::time_point start_time);
-        std::expected<std::shared_ptr<PooledRedissConnection>, RedisError> getConnectionSync();
-        bool checkConnectionHealthSync(std::shared_ptr<PooledRedissConnection> conn);
+        acquireSync(std::chrono::steady_clock::time_point start_time); ///< 同步获取连接实现
+        void recordAcquireStats(std::chrono::steady_clock::time_point start_time); ///< 记录获取连接统计
+        std::expected<std::shared_ptr<PooledRedissConnection>, RedisError> getConnectionSync(); ///< 获取或创建连接
+        bool checkConnectionHealthSync(std::shared_ptr<PooledRedissConnection> conn); ///< 检查连接健康状态
 
     private:
-        IOScheduler* m_scheduler;
-        RedissConnectionPoolConfig m_config;
-        std::queue<std::shared_ptr<PooledRedissConnection>> m_available_connections;
-        std::vector<std::shared_ptr<PooledRedissConnection>> m_all_connections;
-        mutable std::mutex m_mutex;
-        std::condition_variable m_cv;
+        IOScheduler* m_scheduler;                                                    ///< IO 调度器
+        RedissConnectionPoolConfig m_config;                                         ///< 连接池配置
+        std::queue<std::shared_ptr<PooledRedissConnection>> m_available_connections; ///< 可用连接队列
+        std::vector<std::shared_ptr<PooledRedissConnection>> m_all_connections;      ///< 所有连接列表
+        mutable std::mutex m_mutex;                                                  ///< 互斥锁
+        std::condition_variable m_cv;                                                ///< 条件变量
 
-        std::atomic<bool> m_is_initialized{false};
-        std::atomic<bool> m_is_shutting_down{false};
+        std::atomic<bool> m_is_initialized{false};       ///< 是否已初始化
+        std::atomic<bool> m_is_shutting_down{false};     ///< 是否正在关闭
 
-        std::atomic<uint64_t> m_total_acquired{0};
-        std::atomic<uint64_t> m_total_released{0};
-        std::atomic<uint64_t> m_total_created{0};
-        std::atomic<uint64_t> m_total_destroyed{0};
-        std::atomic<uint64_t> m_health_check_failures{0};
-        std::atomic<size_t> m_waiting_requests{0};
-        std::atomic<uint64_t> m_reconnect_attempts{0};
-        std::atomic<uint64_t> m_reconnect_successes{0};
-        std::atomic<uint64_t> m_validation_failures{0};
+        std::atomic<uint64_t> m_total_acquired{0};       ///< 总获取次数
+        std::atomic<uint64_t> m_total_released{0};       ///< 总归还次数
+        std::atomic<uint64_t> m_total_created{0};        ///< 总创建次数
+        std::atomic<uint64_t> m_total_destroyed{0};      ///< 总销毁次数
+        std::atomic<uint64_t> m_health_check_failures{0}; ///< 健康检查失败次数
+        std::atomic<size_t> m_waiting_requests{0};       ///< 等待中的请求数
+        std::atomic<uint64_t> m_reconnect_attempts{0};   ///< 重连尝试次数
+        std::atomic<uint64_t> m_reconnect_successes{0};  ///< 重连成功次数
+        std::atomic<uint64_t> m_validation_failures{0};  ///< 验证失败次数
 
-        std::atomic<uint64_t> m_total_acquire_time_ms{0};
-        std::atomic<double> m_max_acquire_time_ms{0.0};
-        std::atomic<size_t> m_peak_active_connections{0};
+        std::atomic<uint64_t> m_total_acquire_time_ms{0};  ///< 总获取时间（毫秒）
+        std::atomic<double> m_max_acquire_time_ms{0.0};    ///< 最大获取时间（毫秒）
+        std::atomic<size_t> m_peak_active_connections{0};  ///< 峰值活跃连接数
     };
 
     /**
@@ -685,18 +771,31 @@ namespace galay::redis
         std::shared_ptr<PooledConnection> m_conn;
     };
 
+    /**
+     * @brief RAII 风格的 Rediss 连接获取器
+     * @details 自动归还 Rediss 连接到连接池，析构时自动释放
+     */
     class ScopedRedissConnection
     {
     public:
+        /**
+         * @brief 构造 ScopedRedissConnection
+         * @param pool Rediss 连接池引用
+         * @param conn 已获取的 Rediss 连接
+         */
         ScopedRedissConnection(RedissConnectionPool& pool, std::shared_ptr<PooledRedissConnection> conn)
             : m_pool(&pool)
             , m_conn(std::move(conn))
         {
         }
 
-        ScopedRedissConnection(const ScopedRedissConnection&) = delete;
-        ScopedRedissConnection& operator=(const ScopedRedissConnection&) = delete;
+        ScopedRedissConnection(const ScopedRedissConnection&) = delete; ///< 禁止拷贝
+        ScopedRedissConnection& operator=(const ScopedRedissConnection&) = delete; ///< 禁止拷贝赋值
 
+        /**
+         * @brief 移动构造函数
+         * @param other 另一个 ScopedRedissConnection
+         */
         ScopedRedissConnection(ScopedRedissConnection&& other) noexcept
             : m_pool(other.m_pool)
             , m_conn(std::move(other.m_conn))
@@ -704,6 +803,11 @@ namespace galay::redis
             other.m_pool = nullptr;
         }
 
+        /**
+         * @brief 移动赋值运算符
+         * @param other 另一个 ScopedRedissConnection
+         * @return 当前对象引用
+         */
         ScopedRedissConnection& operator=(ScopedRedissConnection&& other) noexcept
         {
             if (this != &other) {
@@ -715,17 +819,20 @@ namespace galay::redis
             return *this;
         }
 
-        RedissClient* get() { return m_conn ? m_conn->get() : nullptr; }
-        const RedissClient* get() const { return m_conn ? m_conn->get() : nullptr; }
+        RedissClient* get() { return m_conn ? m_conn->get() : nullptr; }              ///< 获取原始客户端指针
+        const RedissClient* get() const { return m_conn ? m_conn->get() : nullptr; }  ///< 获取原始客户端指针（const）
 
-        RedissClient* operator->() { return get(); }
-        const RedissClient* operator->() const { return get(); }
+        RedissClient* operator->() { return get(); }              ///< 箭头操作符访问客户端
+        const RedissClient* operator->() const { return get(); }  ///< 箭头操作符访问客户端（const）
 
-        RedissClient& operator*() { return *get(); }
-        const RedissClient& operator*() const { return *get(); }
+        RedissClient& operator*() { return *get(); }              ///< 解引用操作符
+        const RedissClient& operator*() const { return *get(); }  ///< 解引用操作符（const）
 
-        explicit operator bool() const { return m_conn != nullptr; }
+        explicit operator bool() const { return m_conn != nullptr; } ///< 检查是否持有有效连接
 
+        /**
+         * @brief 手动释放连接，归还到连接池
+         */
         void release()
         {
             if (m_pool && m_conn) {
@@ -734,14 +841,17 @@ namespace galay::redis
             }
         }
 
+        /**
+         * @brief 析构函数，自动归还连接
+         */
         ~ScopedRedissConnection()
         {
             release();
         }
 
     private:
-        RedissConnectionPool* m_pool;
-        std::shared_ptr<PooledRedissConnection> m_conn;
+        RedissConnectionPool* m_pool;                                    ///< 连接池指针
+        std::shared_ptr<PooledRedissConnection> m_conn;                  ///< 持有的连接
     };
 
 } // namespace galay::redis

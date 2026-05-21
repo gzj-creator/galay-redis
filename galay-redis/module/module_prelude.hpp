@@ -1,6 +1,15 @@
+/**
+ * @file module_prelude.hpp
+ * @brief C++23 模块构建的自动前导头文件
+ * @author galay-redis
+ * @version 1.0.0
+ *
+ * @details 为 Clang/GCC/MSVC 的过渡性 C++23 模块构建提供自动前导。
+ *          将第三方、系统和依赖头文件放入全局模块片段中，
+ *          确保模块构建时正确隔离标准库和项目依赖。
+ */
+
 #pragma once
-// Auto prelude for transitional C++23 module builds on Clang/GCC/MSVC.
-// Keep third-party/system/dependency headers in global module fragment.
 
 #if __has_include(<any>)
 #include <any>

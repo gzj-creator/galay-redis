@@ -1,3 +1,13 @@
+/**
+ * @file config.h
+ * @brief 异步 Redis 客户端配置
+ * @author galay-redis
+ * @version 1.0.0
+ *
+ * @details 定义异步 Redis 客户端的超时和缓冲区配置结构体，
+ *          提供多种工厂方法以便快速创建常用配置。
+ */
+
 #ifndef GALAY_REDIS_ASYNC_CONFIG_H
 #define GALAY_REDIS_ASYNC_CONFIG_H
 
@@ -7,7 +17,7 @@ namespace galay::redis
 {
     /**
      * @brief 异步Redis超时配置结构体
-     * 用于在每个异步接口调用时指定 send/recv 的超时参数
+     * @details 用于在每个异步接口调用时指定 send/recv 的超时参数和缓冲区大小
      */
     struct AsyncRedisConfig
     {
